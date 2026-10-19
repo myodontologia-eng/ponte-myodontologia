@@ -14,11 +14,17 @@ class PromptRequest(BaseModel):
 @app.post("/gerar")
 async def gerar_texto(request: PromptRequest):
     if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, status_code_detail="Chave API não configurada")
+        raise HTTPException(status_code=500, detail="Chave API não configurada")
 
-    # Endpoint oficial da API do Gemini (REST)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # Endpoint oficial da API do Gemini (sem o ?key=)
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
     
+    # Cabeçalho com Bearer Token para aceitar credenciais do tipo AQ...
+    headers = {
+        "Authorization": f"Bearer {GEMINI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
         "contents": [{
             "parts": [{"text": request.prompt}]
@@ -27,7 +33,7 @@ async def gerar_texto(request: PromptRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(url, json=payload, timeout=30.0)
+            response = await client.post(url, headers=headers, json=payload, timeout=30.0)
             
             if response.status_code != 200:
                 raise HTTPException(status_code=response.status_code, detail=response.text)
