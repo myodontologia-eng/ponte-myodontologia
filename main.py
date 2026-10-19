@@ -41,19 +41,18 @@ async def processar_agendamento(payload: EventoPayload):
     Se alguma informação não estiver presente, coloque null.
     """
 
-  # Pega a chave de forma segura direto das variáveis de ambiente do Render
   api_key = os.getenv("GEMINI_API_KEY")
   if not api_key:
     raise HTTPException(
         status_code=500, detail="Chave da API do Gemini não configurada."
     )
 
-  # Usando o modelo Flash (camada gratuita, sem custos e sem cartão)
   gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
   gemini_body = {"contents": [{"parts": [{"text": prompt_texto}]}]}
 
   async with httpx.AsyncClient() as client:
     try:
+      # 1. Comunica com o Gemini
       response_gemini = await client.post(
           gemini_url, json=gemini_body, timeout=30.0
       )
@@ -67,9 +66,24 @@ async def processar_agendamento(payload: EventoPayload):
           .get("text", "{}")
       )
 
-    except Exception as e:
-      raise HTTPException(
-          status_code=500, detail=f"Erro ao comunicar com o Gemini: {str(e)}"
+      # Limpa possíveis formatações de markdown caso o Gemini envie
+      import json
+
+      limpo = texto_gerado.replace("```json", "").replace("```", "").strip()
+      dados_json = json.loads(limpo)
+
+      # 2. Envia os dados estruturados para o Webhook do WordPress
+      response_wp = await client.post(
+          WORDPRESS_WEBHOOK_URL, json=dados_json, timeout=30.0
       )
 
-  return {"status": "sucesso", "dados_processados": texto_gerado}
+    except Exception as e:
+      raise HTTPException(
+          status_code=500, detail=f"Erro ao processar ou enviar: {str(e)}"
+      )
+
+  return {
+      "status": "sucesso",
+      "wordpress_status": response_wp.status_code,
+      "dados_enviados": dados_json,
+  }
