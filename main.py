@@ -48,8 +48,8 @@ async def processar_agendamento(payload: EventoPayload):
         status_code=500, detail="ERRO DETALHADO: Chave da API do Gemini não configurada nas variáveis de ambiente do Render."
     )
 
-  gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
-  gemini_body = {"contents": [{"parts": [{"text": prompt_texto}]}]}
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+
 
   async with httpx.AsyncClient() as client:
     try:
