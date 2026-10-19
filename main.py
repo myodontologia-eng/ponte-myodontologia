@@ -66,6 +66,7 @@ async def processar_agendamento(payload: EventoPayload):
           .get("parts", [{}])[0]
           .get("text", "{}")
       )
+      print(f"TEXTO RECEBIDO DO GEMINI: {texto_gerado}")
 
       # Limpa possíveis formatações de markdown caso o Gemini envie
       limpo = texto_gerado.replace("```json", "").replace("```", "").strip()
