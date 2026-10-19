@@ -1,3 +1,4 @@
+import json
 import os
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -44,7 +45,7 @@ async def processar_agendamento(payload: EventoPayload):
   api_key = os.getenv("GEMINI_API_KEY")
   if not api_key:
     raise HTTPException(
-        status_code=500, detail="Chave da API do Gemini não configurada."
+        status_code=500, detail="ERRO DETALHADO: Chave da API do Gemini não configurada nas variáveis de ambiente do Render."
     )
 
   gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
@@ -67,8 +68,6 @@ async def processar_agendamento(payload: EventoPayload):
       )
 
       # Limpa possíveis formatações de markdown caso o Gemini envie
-      import json
-
       limpo = texto_gerado.replace("```json", "").replace("```", "").strip()
       dados_json = json.loads(limpo)
 
@@ -79,7 +78,7 @@ async def processar_agendamento(payload: EventoPayload):
 
     except Exception as e:
       raise HTTPException(
-          status_code=500, detail=f"Erro ao processar ou enviar: {str(e)}"
+          status_code=500, detail=f"ERRO DETALHADO AO PROCESSAR: {str(e)}"
       )
 
   return {
