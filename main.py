@@ -51,6 +51,7 @@ async def processar_agendamento(payload: EventoPayload):
     gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
 
 
+
   async with httpx.AsyncClient() as client:
     try:
       # 1. Comunica com o Gemini
