@@ -77,10 +77,11 @@ async def processar_agendamento(payload: EventoPayload):
           WORDPRESS_WEBHOOK_URL, json=dados_json, timeout=30.0
       )
 
-    except Exception as e:
+        except Exception as e:
       raise HTTPException(
-          status_code=500, detail=f"ERRO DETALHADO AO PROCESSAR: {str(e)}"
+          status_code=500, detail=f"ERRO: {str(e)}"
       )
+
 
   return {
       "status": "sucesso",
