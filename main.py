@@ -45,16 +45,15 @@ async def processar_agendamento(payload: EventoPayload):
   api_key = os.getenv("GEMINI_API_KEY")
   if not api_key:
     raise HTTPException(
-        status_code=500, detail="ERRO DETALHADO: Chave da API do Gemini não configurada nas variáveis de ambiente do Render."
+        status_code=500, detail="Chave da API do Gemini não configurada."
     )
 
-    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-
-
+  # Usando o modelo correto e estável gemini-1.5-flash
+  gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+  gemini_body = {"contents": [{"parts": [{"text": prompt_texto}]}]}
 
   async with httpx.AsyncClient() as client:
     try:
-      # 1. Comunica com o Gemini
       response_gemini = await client.post(
           gemini_url, json=gemini_body, timeout=30.0
       )
@@ -67,22 +66,20 @@ async def processar_agendamento(payload: EventoPayload):
           .get("parts", [{}])[0]
           .get("text", "{}")
       )
-      print(f"TEXTO RECEBIDO DO GEMINI: {texto_gerado}")
 
-      # Limpa possíveis formatações de markdown caso o Gemini envie
       limpo = texto_gerado.replace("```json", "").replace("```", "").strip()
       dados_json = json.loads(limpo)
 
-      # 2. Envia os dados estruturados para o Webhook do WordPress
       response_wp = await client.post(
           WORDPRESS_WEBHOOK_URL, json=dados_json, timeout=30.0
       )
 
-        except Exception as e:
+    except Exception as e:
+      import traceback
+      traceback.print_exc()
       raise HTTPException(
-          status_code=500, detail=f"ERRO: {str(e)}"
+          status_code=500, detail=f"ERRO DETALHADO AO PROCESSAR: {str(e)}"
       )
-
 
   return {
       "status": "sucesso",
