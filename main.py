@@ -48,8 +48,8 @@ async def processar_agendamento(payload: EventoPayload):
         status_code=500, detail="Chave da API do Gemini não configurada."
     )
 
-  # Usando o modelo correto e estável gemini-1.5-flash
-  gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+  # Endpoint oficial v1 atualizado e estável
+  gemini_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
   gemini_body = {"contents": [{"parts": [{"text": prompt_texto}]}]}
 
   async with httpx.AsyncClient() as client:
