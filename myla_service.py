@@ -29,10 +29,10 @@ class FAQRequest(BaseModel):
     topic: Literal["horarios", "endereco", "servicos", "valores", "implantes", "siso", "agendar", "saudacao"]
 
 class Patient(BaseModel):
-    name: str = Field(min_length=3, max_length=150)
-    birth: str = Field(min_length=10, max_length=10)
-    phone: str = Field(min_length=10, max_length=40)
-    reason: str = Field(min_length=2, max_length=140)
+    name: str = Field(default="", max_length=150)
+    birth: str = Field(default="", max_length=10)
+    phone: str = Field(default="", max_length=40)
+    reason: str = Field(default="", max_length=140)
     responsible: str = Field(default="", max_length=150)
     responsible_phone: str = Field(default="", max_length=40)
 
@@ -41,6 +41,7 @@ class BookingRequest(BaseModel):
     start: str = Field(max_length=40)
     request_id: str = Field(min_length=16, max_length=90)
     confirmed: bool = False
+    allow_incomplete: bool = False
 
 def slot_time(value, now=None):
     now = now or datetime.now(TZ)
@@ -119,23 +120,43 @@ def book(body):
         raise CalendarError(422, "Confirme os dados antes de reservar")
     p = {k: re.sub(r"\s+", " ", v).strip() for k, v in body.patient.model_dump().items()}
     now = datetime.now(TZ)
-    try:
-        birth = datetime.strptime(p["birth"], "%d/%m/%Y").date()
-        if birth > now.date() or birth.year < now.year - 120:
-            raise ValueError()
-    except ValueError:
-        raise CalendarError(422, "Data de nascimento inválida")
-    if len(p["name"].split()) < 2 or not 10 <= len(re.sub(r"\D", "", p["phone"])) <= 13:
-        raise CalendarError(422, "Confira nome completo e telefone com DDD")
-    age = now.year - birth.year - ((now.month, now.day) < (birth.month, birth.day))
-    if age < 18 and (len(p["responsible"].split()) < 2 or not 10 <= len(re.sub(r"\D", "", p["responsible_phone"])) <= 13):
-        raise CalendarError(422, "Informe nome completo e telefone do responsável pelo menor")
+    birth = None
+    if p["birth"]:
+        try:
+            birth = datetime.strptime(p["birth"], "%d/%m/%Y").date()
+            if birth > now.date() or birth.year < now.year - 120:
+                raise ValueError()
+        except ValueError:
+            raise CalendarError(422, "Data de nascimento inválida")
+    missing = []
+    if not p["name"]:
+        raise CalendarError(422, "Informe o nome do paciente")
+    if not birth:
+        missing.append("data de nascimento")
+    if not p["phone"]:
+        missing.append("telefone")
+    elif not 10 <= len(re.sub(r"\D", "", p["phone"])) <= 13:
+        raise CalendarError(422, "Confira o telefone com DDD")
+    if not p["reason"]:
+        missing.append("motivo")
+    age = None if birth is None else now.year - birth.year - ((now.month, now.day) < (birth.month, birth.day))
+    if age is not None and age < 18:
+        if len(p["responsible"].split()) < 2:
+            missing.append("nome completo do responsável")
+        if not p["responsible_phone"]:
+            missing.append("telefone do responsável")
+        elif not 10 <= len(re.sub(r"\D", "", p["responsible_phone"])) <= 13:
+            raise CalendarError(422, "Confira o telefone do responsável")
+    if missing and not body.allow_incomplete:
+        raise CalendarError(422, "Confira os dados: " + ", ".join(missing))
     start = slot_time(body.start)
     end = start + timedelta(minutes=15)
-    lines = ["Nome: " + p["name"], "Data de nascimento: " + p["birth"], "Telefone: " + p["phone"], "Motivo: " + p["reason"], "Status: Agendado"]
+    lines = ["Nome: " + (p["name"] or "Não informado"), "Data de nascimento: " + (p["birth"] or "Não informado"), "Telefone: " + (p["phone"] or "Não informado"), "Motivo: " + (p["reason"] or "Não informado"), "Status: Agendado"]
+    if missing:
+        lines += ["Cadastro incompleto — equipe deve completar: " + ", ".join(missing)]
     if p["responsible"]:
         lines += ["Responsável: " + p["responsible"], "Telefone do responsável: " + p["responsible_phone"]]
-    return create_checked(summary=p["reason"] + " - " + p["name"], description="\n".join(lines), start=start.isoformat(), end=end.isoformat(), idempotency_key="myla-" + body.request_id, user="myla-site")
+    return create_checked(summary=("[DADOS PENDENTES] " if missing else "") + (p["reason"] or "Consulta") + " - " + (p["name"] or "Nome não informado"), description="\n".join(lines), start=start.isoformat(), end=end.isoformat(), idempotency_key="myla-" + body.request_id, user="myla-site")
 
 def gemini_error(code):
     messages = {400: "Gemini recusou a configuração. Confira a chave e o modelo.", 401: "Chave Gemini recusada.", 403: "Chave Gemini sem permissão.", 404: "Modelo gemini-3.8-flash indisponível para esta chave (HTTP 404).", 429: "Limite ou saldo da API Gemini atingido."}
