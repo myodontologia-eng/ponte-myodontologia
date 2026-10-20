@@ -116,12 +116,12 @@ def update_event_status(event_id, status, start=None, end=None, user=None, etag=
         props['updated_at'] = datetime.now(timezone.utc).isoformat()
         if user:
             props['updated_by'] = user[:200]
-        body = {'extendedProperties': {'private': props}, 'description': status_description(event.get('description', ''), status)}
+        body = {'status': 'cancelled' if status == 'Desmarcou' else 'confirmed', 'extendedProperties': {'private': props}, 'description': status_description(event.get('description', ''), status)}
         if start:
             body.update(start={'dateTime': start}, end={'dateTime': end})
         request = service.events().patch(calendarId=cid, eventId=event_id, body=body, sendUpdates='none')
         request.headers['If-Match'] = event['etag']
         updated = request.execute()
-        return safe_event(updated) | {'previous_status': previous, 'new_status': status, 'updated_at': props['updated_at'], 'updated_by': user}
+        return safe_event(event | body | updated) | {'previous_status': previous, 'new_status': status, 'updated_at': props['updated_at'], 'updated_by': user}
     except HttpError as error:
         translate_error(error)
