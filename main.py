@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from calendar_service import list_events, update_event_status, create_event, calendar_id, CalendarError
 
+from myla_service import FAQRequest, BookingRequest, faq as myla_faq, slots as myla_slots, book as myla_book, create_checked
+
 app = FastAPI()
 security = HTTPBearer()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -83,7 +85,7 @@ async def get_calendar_events(time_min: Optional[str] = Query(default=None), tim
 
 @app.post("/api/calendar/events", dependencies=[Depends(verify_token), Depends(verify_calendar)])
 async def post_calendar_event(body: CreateEventRequest, idempotency_key: str = Header(min_length=16, max_length=128)):
-    return await calendar_call(create_event, **body.model_dump(), idempotency_key=idempotency_key)
+    return await calendar_call(create_checked, **body.model_dump(), idempotency_key=idempotency_key)
 
 @app.patch("/api/calendar/events/{event_id}", dependencies=[Depends(verify_token), Depends(verify_calendar)])
 async def patch_calendar_event(event_id: str, body: UpdateStatusRequest):
@@ -91,3 +93,20 @@ async def patch_calendar_event(event_id: str, body: UpdateStatusRequest):
         raise HTTPException(status_code=422, detail="Identificador inválido")
     return await calendar_call(update_event_status, event_id=event_id, **body.model_dump())
 
+
+# The website sends only allowlisted generic FAQ topics to Gemini.
+@app.post("/api/myla/faq", dependencies=[Depends(verify_token)])
+async def post_myla_faq(body: FAQRequest):
+    return await myla_faq(body.topic)
+
+@app.post("/api/myla/test", dependencies=[Depends(verify_token)])
+async def post_myla_test():
+    return await myla_faq("saudacao")
+
+@app.get("/api/myla/slots", dependencies=[Depends(verify_token), Depends(verify_calendar)])
+async def get_myla_slots(day: str = Query(min_length=10, max_length=10)):
+    return await calendar_call(myla_slots, day=day)
+
+@app.post("/api/myla/book", dependencies=[Depends(verify_token), Depends(verify_calendar)])
+async def post_myla_book(body: BookingRequest):
+    return await calendar_call(myla_book, body=body)
