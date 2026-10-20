@@ -110,3 +110,14 @@ async def get_myla_slots(day: str = Query(min_length=10, max_length=10)):
 @app.post("/api/myla/book", dependencies=[Depends(verify_token), Depends(verify_calendar)])
 async def post_myla_book(body: BookingRequest):
     return await calendar_call(myla_book, body=body)
+
+
+@app.on_event("startup")
+async def migrate_former_calendar():
+    if os.getenv("MIGRATE_FROM_CALENDAR_ID"):
+        import logging
+        from calendar_migration import run
+        try:
+            await run_in_threadpool(run)
+        except Exception as error:
+            logging.getLogger("uvicorn.error").error("CALENDAR_MIGRATION incomplete (%s); original calendar unchanged", type(error).__name__)
