@@ -154,7 +154,7 @@ async def model_name(client, key):
     if r.status_code != 200:
         gemini_error(r.status_code)
     names = [m["name"].removeprefix("models/") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
-    preferred = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    preferred = ["gemini-2.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
     candidates = [n for n in preferred if n in names] or sorted(n for n in names if "flash" in n and not any(x in n for x in ["image", "tts", "live", "audio", "robotics"]))
     if not candidates:
         raise HTTPException(503, "Nenhum modelo Flash disponível para esta chave")
@@ -167,8 +167,10 @@ async def faq(topic):
     if not key:
         raise HTTPException(503, "GEMINI_API_KEY não configurada no Render")
     try:
-        async with httpx.AsyncClient(timeout=40) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as client:
+            stage = "listagem de modelos"
             model = await model_name(client, key)
+            stage = "geração de resposta (" + model + ")"
             prompt = "Você é Myla, assistente virtual da MY Odontologia. Responda em português em até 3 frases, sem inventar fatos. Não dê diagnóstico nem prescrição. Responda apenas com estas informações aprovadas: " + TOPICS[topic]
             r = await client.post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", headers={"x-goog-api-key": key}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.2}})
         if r.status_code != 200:
@@ -178,5 +180,5 @@ async def faq(topic):
         if not answer:
             raise HTTPException(502, "Gemini respondeu sem texto. Confira o modelo no Render.")
         return {"answer": answer[:2000], "model": model, "personal_data_sent": False}
-    except httpx.HTTPError:
-        raise HTTPException(504, "A conexão Gemini demorou. Tente novamente.")
+    except httpx.HTTPError as error:
+        raise HTTPException(504, "Gemini: falha na " + stage + " — " + type(error).__name__ + ". Tente novamente.")
