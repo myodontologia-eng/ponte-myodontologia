@@ -142,9 +142,9 @@ def gemini_error(code):
     messages = {400: "Gemini recusou a configuração. Confira a chave e o modelo.", 401: "Chave Gemini recusada.", 403: "Chave Gemini sem permissão.", 404: "Modelo Gemini indisponível.", 429: "Limite ou saldo da API Gemini atingido."}
     raise HTTPException(502, messages.get(code, "Gemini temporariamente indisponível."))
 
-async def model_name(client, key):
+async def model_name(client, key, ignore_config=False):
     configured = os.getenv("GEMINI_MODEL", "").removeprefix("models/")
-    if configured:
+    if configured and not ignore_config:
         if not re.fullmatch(r"[a-zA-Z0-9._-]{1,100}", configured):
             raise HTTPException(503, "GEMINI_MODEL inválido no Render")
         return configured
@@ -173,6 +173,12 @@ async def faq(topic):
             stage = "geração de resposta (" + model + ")"
             prompt = "Você é Myla, assistente virtual da MY Odontologia. Responda em português em até 3 frases, sem inventar fatos. Não dê diagnóstico nem prescrição. Responda apenas com estas informações aprovadas: " + TOPICS[topic]
             r = await client.post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", headers={"x-goog-api-key": key}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.2}})
+            if r.status_code == 404:
+                MODEL_CACHE.update(model="", at=0)
+                stage = "listagem de modelos compatíveis"
+                model = await model_name(client, key, ignore_config=True)
+                stage = "geração de resposta (" + model + ")"
+                r = await client.post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", headers={"x-goog-api-key": key}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.2}})
         if r.status_code != 200:
             gemini_error(r.status_code)
         parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
