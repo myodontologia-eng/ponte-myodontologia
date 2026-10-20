@@ -5,7 +5,7 @@ import httpx
 
 app = FastAPI()
 
-# Lê a chave do Render (a que começa por AQ...)
+# Lê a chave do Render (chaves novas do AI Studio começam com AQ.)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 class PromptRequest(BaseModel):
@@ -16,12 +16,12 @@ async def gerar_texto(request: PromptRequest):
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="Chave API não configurada")
 
-    # Endpoint oficial da API do Gemini (sem o ?key=)
+    # Endpoint oficial da API do Gemini
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
     
-    # Cabeçalho com Bearer Token para aceitar credenciais do tipo AQ...
+    # Header correto para chaves AQ. (Authorization Bearer não funciona com elas)
     headers = {
-        "Authorization": f"Bearer {GEMINI_API_KEY}",
+        "x-goog-api-key": GEMINI_API_KEY,
         "Content-Type": "application/json"
     }
 
