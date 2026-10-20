@@ -16,8 +16,8 @@ async def gerar_texto(request: PromptRequest):
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="Chave API não configurada")
 
-    # Endpoint oficial da API do Gemini
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    # Modelo mais recente (melhor compatibilidade com chaves AQ.)
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     
     # Header correto para chaves AQ. (Authorization Bearer não funciona com elas)
     headers = {
