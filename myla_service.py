@@ -1,7 +1,6 @@
 """Website Myla: only fixed FAQ topics are sent to Gemini; bookings stay outside AI."""
 import os
 import re
-import time as clock
 import hashlib
 import threading
 from datetime import datetime, timedelta, time, date
@@ -15,7 +14,7 @@ from calendar_service import list_events, create_event, calendar_id, parse_time,
 
 TZ = ZoneInfo("America/Sao_Paulo")
 WRITE_LOCK = threading.RLock()
-MODEL_CACHE = {"model": "", "at": 0}
+GEMINI_MODEL = "gemini-3.8-flash"
 TOPICS = {
     "horarios": "Horários de TESTE da clínica: segunda a sexta, 16h às 20h; sábado, 7h às 13h; domingo fechado. Consulta padrão de 15 minutos e antecedência mínima de 1 hora.",
     "endereco": "A MY Odontologia fica na Rua Cristóvão Colombo, 1451, Alto Paraná, Paraná.",
@@ -139,27 +138,8 @@ def book(body):
     return create_checked(summary=p["reason"] + " - " + p["name"], description="\n".join(lines), start=start.isoformat(), end=end.isoformat(), idempotency_key="myla-" + body.request_id, user="myla-site")
 
 def gemini_error(code):
-    messages = {400: "Gemini recusou a configuração. Confira a chave e o modelo.", 401: "Chave Gemini recusada.", 403: "Chave Gemini sem permissão.", 404: "Modelo Gemini indisponível.", 429: "Limite ou saldo da API Gemini atingido."}
+    messages = {400: "Gemini recusou a configuração. Confira a chave e o modelo.", 401: "Chave Gemini recusada.", 403: "Chave Gemini sem permissão.", 404: "Modelo gemini-3.8-flash indisponível para esta chave (HTTP 404).", 429: "Limite ou saldo da API Gemini atingido."}
     raise HTTPException(502, messages.get(code, "Gemini temporariamente indisponível."))
-
-async def model_name(client, key, ignore_config=False):
-    configured = os.getenv("GEMINI_MODEL", "").removeprefix("models/")
-    if configured and not ignore_config:
-        if not re.fullmatch(r"[a-zA-Z0-9._-]{1,100}", configured):
-            raise HTTPException(503, "GEMINI_MODEL inválido no Render")
-        return configured
-    if MODEL_CACHE["model"] and clock.monotonic() - MODEL_CACHE["at"] < 3600:
-        return MODEL_CACHE["model"]
-    r = await client.get("https://generativelanguage.googleapis.com/v1beta/models", headers={"x-goog-api-key": key})
-    if r.status_code != 200:
-        gemini_error(r.status_code)
-    names = [m["name"].removeprefix("models/") for m in r.json().get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
-    preferred = ["gemini-2.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"]
-    candidates = [n for n in preferred if n in names] or sorted(n for n in names if "flash" in n and not any(x in n for x in ["image", "tts", "live", "audio", "robotics"]))
-    if not candidates:
-        raise HTTPException(503, "Nenhum modelo Flash disponível para esta chave")
-    MODEL_CACHE.update(model=candidates[0], at=clock.monotonic())
-    return candidates[0]
 
 async def faq(topic):
     """topic is a Literal allowlist; no free text, identity or history leaves WordPress."""
@@ -168,17 +148,10 @@ async def faq(topic):
         raise HTTPException(503, "GEMINI_API_KEY não configurada no Render")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(60, connect=10)) as client:
-            stage = "listagem de modelos"
-            model = await model_name(client, key)
+            model = GEMINI_MODEL
             stage = "geração de resposta (" + model + ")"
             prompt = "Você é Myla, assistente virtual da MY Odontologia. Responda em português em até 3 frases, sem inventar fatos. Não dê diagnóstico nem prescrição. Responda apenas com estas informações aprovadas: " + TOPICS[topic]
             r = await client.post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", headers={"x-goog-api-key": key}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.2}})
-            if r.status_code == 404:
-                MODEL_CACHE.update(model="", at=0)
-                stage = "listagem de modelos compatíveis"
-                model = await model_name(client, key, ignore_config=True)
-                stage = "geração de resposta (" + model + ")"
-                r = await client.post("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent", headers={"x-goog-api-key": key}, json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.2}})
         if r.status_code != 200:
             gemini_error(r.status_code)
         parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
