@@ -45,6 +45,8 @@ def validate_period(start, end):
         raise CalendarError(422, 'O término deve ser posterior ao início')
 
 def safe_event(event):
+    if event.get('status') == 'cancelled':
+        return {key: event[key] for key in ('id', 'summary', 'description', 'start', 'end', 'etag', 'status', 'updated', 'extendedProperties') if event.get(key) is not None} | {'calendar_id': calendar_id()}
     identity = appointment_identity(event)
     return {key: event.get(key) for key in ('id', 'summary', 'description', 'start', 'end', 'extendedProperties', 'updated', 'etag', 'status')} | {
         'calendar_id': calendar_id(), 'summary': identity['name'],
@@ -66,7 +68,7 @@ def list_events(max_results=250, time_min=None, time_max=None):
     try:
         service = get_calendar_service()
         while True:
-            result = service.events().list(calendarId=calendar_id(), maxResults=min(max_results, 2500), timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime', showDeleted=False, pageToken=page).execute()
+            result = service.events().list(calendarId=calendar_id(), maxResults=min(max_results, 2500), timeMin=time_min, timeMax=time_max, singleEvents=True, orderBy='startTime', showDeleted=True, pageToken=page).execute()
             events.extend(safe_event(event) for event in result.get('items', []))
             page = result.get('nextPageToken')
             if not page:

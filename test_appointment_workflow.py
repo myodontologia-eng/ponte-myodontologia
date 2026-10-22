@@ -2,12 +2,12 @@ import asyncio
 import os
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 os.environ.setdefault('GOOGLE_CALENDAR_ID', 'test-calendar')
 from appointment_identity import appointment_identity, appointment_label
 import telegram_service as telegram
-from calendar_service import safe_event, CalendarError
+from calendar_service import safe_event, CalendarError, list_events
 
 
 class IdentityTest(unittest.TestCase):
@@ -22,6 +22,17 @@ class IdentityTest(unittest.TestCase):
 
     def test_missing_optional_properties(self):
         self.assertEqual(appointment_identity({'summary': 'Paciente', 'extendedProperties': None})['name'], 'Paciente')
+
+    def test_deleted_events_are_requested_and_sparse_tombstones_remain_sparse(self):
+        service = MagicMock()
+        tombstone = {'id': 'cancelled-event', 'status': 'cancelled', 'etag': 'v2'}
+        service.events.return_value.list.return_value.execute.return_value = {'items': [tombstone]}
+        with patch('calendar_service.get_calendar_service', return_value=service):
+            events = list_events(time_min='2026-10-22T00:00:00-03:00', time_max='2026-10-23T00:00:00-03:00')
+        self.assertTrue(service.events.return_value.list.call_args.kwargs['showDeleted'])
+        self.assertEqual(events[0]['status'], 'cancelled')
+        self.assertNotIn('summary', events[0])
+        self.assertNotIn('start', events[0])
 
 
 class TelegramAgendaTest(unittest.IsolatedAsyncioTestCase):

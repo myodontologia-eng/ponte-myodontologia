@@ -214,6 +214,7 @@ function myod_cal_date($value){
     return $d&&$d->format('Y-m-d')===$value?$d:false;
 }
 function myod_cal_status($event){
+    if(($event['status']??'')==='cancelled')return 'desmarcou';
     $s=$event['extendedProperties']['private']['status']??'';
     foreach(myod_cal_statuses() as $key=>$label)if($s===$label)return $key;
     if(preg_match('/(?:^|\R)\s*Status:\s*([^\r\n]+)/iu',strip_tags($event['description']??''),$m))foreach(myod_cal_statuses() as $key=>$label)if(mb_strtolower(trim($m[1]))===mb_strtolower($label))return $key;
@@ -294,6 +295,12 @@ function myod_cal_store($event,$source,$trusted=false){
         }
     }
     if($id&&!$trusted&&!myod_calendar_can_edit($id))return new WP_Error('access','Sem permissão para este agendamento.');
+    if(($event['status']??'')==='cancelled'){
+        $saved=$id?get_post_meta($id,'_myod_calendar_event',true):null;
+        if(is_array($saved))$event=array_replace_recursive($saved,array_filter($event,static fn($value)=>$value!==null));
+        if(!$id&&empty($event['start']))return null;
+        if($id)delete_post_meta($id,'_myod_calendar_pending_status');
+    }
     $raw_start=$event['start']['dateTime']??$event['start']['date']??'';if(!$raw_start)return new WP_Error('date','Evento sem horário de início.');
     try{$start=new DateTimeImmutable($raw_start,new DateTimeZone('America/Sao_Paulo'));$start=$start->setTimezone(new DateTimeZone('America/Sao_Paulo'));}catch(Exception $e){return new WP_Error('date','Horário inválido na agenda.');}
     $identity=myod_cal_identity($event);$event['patient_name']=$identity['name'];$event['patient_reason']=$identity['reason'];
@@ -374,7 +381,7 @@ add_action('wp_ajax_myod_calendar',function(){
         $r=myod_cal_request('GET','?'.http_build_query(['time_min'=>$from->format(DATE_ATOM),'time_max'=>$to->format(DATE_ATOM)]));
         if(!is_wp_error($r)){
             if(($r['calendar_id']??'')!==(myod_cal_options()['calendar_id']??''))wp_send_json_error(['message'=>'A ponte respondeu com outra agenda. Confira a configuração.'],409);
-            $events=[];foreach($r['events']??[] as $event){$e=myod_cal_store($event,'google');if(is_wp_error($e)){$r=$e;break;}$events[]=$e;}
+            $events=[];foreach($r['events']??[] as $event){$e=myod_cal_store($event,'google');if(is_wp_error($e)){$r=$e;break;}if($e)$events[]=$e;}
             if(!is_wp_error($r)&&!empty($_POST['include_cancelled'])){
                 $seen=array_column($events,'id');
                 foreach(get_posts(['post_type'=>'prontuario','post_status'=>['private','publish','draft'],'numberposts'=>-1,'meta_key'=>'_myfc_presenca','meta_value'=>'desmarcou']) as $post){
