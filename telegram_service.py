@@ -16,7 +16,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from calendar_service import CalendarError, list_events, update_event_status
-from myla_service import create_checked, slots
+from myla_service import create_checked, slots, reschedule_checked
 from telegram_ai import plan as ai_plan, forget as ai_forget
 
 router = APIRouter(prefix='/telegram', tags=['Telegram'])
@@ -25,7 +25,8 @@ LOCK = asyncio.Lock()
 SESSIONS = {}
 SEEN = {}
 MENU = {'keyboard': [[{'text': 'Agenda de hoje'}, {'text': 'Horários livres'}],
-                     [{'text': 'Novo agendamento'}, {'text': 'Aguardando'}],
+                     [{'text': 'Novo agendamento'}, {'text': 'Alterar agendamento'}],
+                     [{'text': 'Aguardando'}],
                      [{'text': 'Cancelar operação'}]],
         'resize_keyboard': True}
 
@@ -150,7 +151,8 @@ async def prompt(chat, state):
     # Old preview buttons must never confirm a later edited draft.
     state['nonce'] = secrets.token_hex(16)
     d['start'], d['end'] = start.isoformat(), end.isoformat()
-    await send(chat, f"Confirma o agendamento?\nPaciente: {d['name']}\nDia: {start:%d/%m/%Y}\nHorário: {start:%H:%M}–{end:%H:%M}\nDuração: {d['duration']} minutos",
+    question = 'Confirma a remarcação?' if state.get('mode') == 'reschedule' else 'Confirma o agendamento?'
+    await send(chat, f"{question}\nPaciente: {d['name']}\nDia: {start:%d/%m/%Y}\nHorário: {start:%H:%M}–{end:%H:%M}\nDuração: {d['duration']} minutos",
                {'inline_keyboard': [[{'text': 'Confirmar agendamento', 'callback_data': 'confirm:' + state['nonce']},
                                      {'text': 'Cancelar', 'callback_data': 'cancel:' + state['nonce']}]]})
 
@@ -212,6 +214,67 @@ async def arrival_callback(uid, data, state):
     await send(uid, 'Aguardando — paciente chegou e espera atendimento.\n' + delivery, MENU)
 
 
+async def status_list(uid, day):
+    a = datetime.combine(day, datetime.min.time(), TZ)
+    events = await run_in_threadpool(list_events, time_min=a.isoformat(), time_max=(a + timedelta(days=1)).isoformat())
+    events = [e for e in events if e.get('status') != 'cancelled' and e.get('id') and e.get('etag') and e.get('start', {}).get('dateTime')]
+    if not events:
+        await send(uid, f'Nenhum agendamento em {day:%d/%m/%Y}.', MENU)
+        return
+    nonce = secrets.token_hex(12)
+    SESSIONS[str(uid)] = {'mode': 'status', 'events': events, 'nonce': nonce, 'expires': time.monotonic() + 600}
+    rows = []
+    for i, event in enumerate(events[:60]):
+        at = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00')).astimezone(TZ)
+        rows.append([{'text': at.strftime('%H:%M') + ' — ' + (event.get('summary') or 'Consulta')[:80], 'callback_data': f'choose:{nonce}:{i}'}])
+    await send(uid, f'Qual agendamento de {day:%d/%m/%Y} deseja alterar?', {'inline_keyboard': rows})
+
+
+async def status_callback(uid, data, state):
+    parts = data.split(':')
+    if not state or state.get('mode') != 'status' or len(parts) < 2 or parts[1] != state.get('nonce'):
+        await send(uid, 'Esta seleção expirou. Use Alterar agendamento novamente.', MENU)
+        return
+    action = parts[0]
+    if action == 'choose' and len(parts) == 3:
+        try:
+            i = int(parts[2])
+            if i < 0:
+                raise ValueError()
+            state['selected'] = state['events'][i]
+        except (ValueError, IndexError):
+            await send(uid, 'Agendamento inválido. Atualize a lista.', MENU)
+            return
+        state['nonce'] = secrets.token_hex(12)
+        statuses = ['Agendado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']
+        rows = [[{'text': label, 'callback_data': f"status:{state['nonce']}:{label}"}] for label in statuses]
+        await send(uid, 'Agendamento: ' + state['selected'].get('summary', 'Consulta')[:150] + '\nQual é a nova situação?', {'inline_keyboard': rows})
+        return
+    if not state.get('selected'):
+        return
+    if action == 'status' and len(parts) == 3:
+        status = parts[2]
+        if status not in ['Agendado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']:
+            return
+        event = state['selected']
+        if status == 'Remarcado':
+            state.update(mode='reschedule', draft={'name': event.get('summary') or 'Consulta'}, waiting='day')
+            await send(uid, 'Para qual nova data? Informe a data, o horário e a duração. Exemplo: amanhã às 17h por 30 minutos.')
+            return
+        state.update(target_status=status, waiting='status_confirm', nonce=secrets.token_hex(12))
+        at = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00')).astimezone(TZ)
+        await send(uid, f"Confirma alterar para {status}?\n{event.get('summary', 'Consulta')[:150]}\n{at:%d/%m/%Y às %H:%M}",
+                   {'inline_keyboard': [[{'text': 'Confirmar alteração', 'callback_data': 'apply:' + state['nonce']},
+                                         {'text': 'Cancelar', 'callback_data': 'cancel:' + state['nonce']}]]})
+        return
+    if action == 'apply' and state.get('waiting') == 'status_confirm':
+        event = state['selected']
+        result = await run_in_threadpool(update_event_status, event_id=event['id'], status=state['target_status'], etag=event['etag'], user='telegram:' + str(uid))
+        SESSIONS.pop(str(uid), None)
+        note = 'Aviso enviado ao Dr. Márcio.' if result.get('telegram_notification', {}).get('sent') else 'Aviso no Telegram não confirmado; confira a agenda.'
+        await send(uid, 'Situação salva: ' + state['target_status'] + '.\n' + note, MENU)
+
+
 async def handle(update):
     callback = update.get('callback_query')
     message = (callback or {}).get('message') or update.get('message') or {}
@@ -246,6 +309,9 @@ async def handle(update):
         SESSIONS.pop(key, None)
         state = None
     if callback:
+        if callback.get('data', '').startswith(('choose:', 'status:', 'apply:')):
+            await status_callback(uid, callback['data'], state)
+            return
         if callback.get('data', '').startswith('arrival:'):
             await arrival_callback(uid, callback['data'], state)
             return
@@ -258,13 +324,25 @@ async def handle(update):
             await send(uid, 'Operação cancelada. Nenhuma consulta foi criada.', MENU)
         elif action == 'confirm' and state.get('waiting') == 'confirm':
             d = state['draft']
-            await run_in_threadpool(create_checked, summary=d['name'], description='Agendado pela equipe via Telegram.',
+            if state.get('mode') == 'reschedule':
+                event = state['selected']
+                await run_in_threadpool(reschedule_checked, event_id=event['id'], start=d['start'], end=d['end'], etag=event['etag'], user='telegram:' + key)
+            else:
+                await run_in_threadpool(create_checked, summary=d['name'], description='Agendado pela equipe via Telegram.',
                                             start=d['start'], end=d['end'], idempotency_key='telegram-' + nonce, user='telegram:' + key)
             state['waiting'] = 'done'
-            await send(uid, 'Agendamento salvo na agenda central.', MENU)
+            await send(uid, 'Remarcação salva na agenda central.' if state.get('mode') == 'reschedule' else 'Agendamento salvo na agenda central.', MENU)
         return
     text = message.get('text', '').strip()[:1000]
     value = normalized(text)
+    # Common labels from older keyboards and everyday shorthand are local commands.
+    agenda_aliases = {'agenda hoje', 'agenda hj', 'agenda de hj', 'ver agenda',
+                      'ver agenda hoje', 'ver agenda de hoje', 'ver agenda hj',
+                      'ver a agenda', 'ver a agenda de hoje', 'consultar agenda'}
+    if value in agenda_aliases:
+        text, value = 'Agenda de hoje', 'agenda de hoje'
+    elif value in ('quero agendar', 'quero marcar', 'agendar consulta', 'marcar consulta'):
+        text, value = 'Novo agendamento', 'novo agendamento'
     if value in ('/start', '/menu', 'menu', '/cancelar', 'cancelar', 'cancelar operacao'):
         SESSIONS.pop(key, None)
         ai_forget(uid)
@@ -276,7 +354,29 @@ async def handle(update):
     if value in ('aguardando', '/aguardando', 'paciente chegou', 'marcar aguardando'):
         await arrival_list(uid)
         return
-    direct = value in ('agenda de hoje', '/agenda', 'horarios livres', 'novo agendamento') or value.startswith('/horarios')
+    if value in ('alterar agendamento', 'alterar status', '/status', 'faltou', 'desmarcou', 'demarcou', 'remarcou', 'remarcar', 'remarcado'):
+        SESSIONS[key] = {'mode': 'status_day', 'expires': time.monotonic() + 1200}
+        await send(uid, 'De qual dia é o agendamento? Pode escrever hoje, amanhã ou a data.')
+        return
+    if state and state.get('mode') == 'status_day':
+        day = get_day(text)
+        if not day:
+            await send(uid, 'Informe hoje, amanhã ou uma data como 23/10/2026.')
+            return
+        await status_list(uid, day)
+        return
+    if state and state.get('mode') == 'reschedule' and state.get('waiting') != 'done':
+        extract(text, state['draft'])
+        if state.get('waiting') == 'duration' and value.isdigit() and int(value) in (15, 30, 45, 60, 90, 120):
+            state['draft']['duration'] = int(value)
+        await prompt(uid, state)
+        return
+    agenda_day = get_day(text) if value.startswith(('agenda ', 'ver agenda ')) else None
+    if value.startswith('ver agenda ') and agenda_day:
+        text, value = 'agenda ' + agenda_day.strftime('%d/%m/%Y'), 'agenda ' + agenda_day.strftime('%d/%m/%Y')
+    slots_day = state and state.get('mode') == 'slots' and get_day(text)
+    direct = (value in ('agenda de hoje', '/agenda', 'horarios livres', 'novo agendamento')
+              or value.startswith('/horarios') or bool(agenda_day) or bool(slots_day))
     if text and not update.get('_ai_resolved') and not direct:
         active = state if state and state.get('waiting') != 'done' else None
         result = await ai_plan(uid, text, active)
