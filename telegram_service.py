@@ -164,7 +164,7 @@ async def arrival_list(uid):
     events = await run_in_threadpool(list_events, time_min=a.isoformat(), time_max=(a + timedelta(days=1)).isoformat())
     eligible = []
     for event in events:
-        status = event.get('extendedProperties', {}).get('private', {}).get('status', 'Agendado')
+        status = ((event.get('extendedProperties') or {}).get('private') or {}).get('status') or 'Agendado'
         if event.get('status') == 'cancelled' or status not in ('Agendado', 'Remarcado', 'Atendimento atrasado'):
             continue
         value = event.get('start', {}).get('dateTime')
@@ -423,7 +423,7 @@ async def handle(update):
         for event in events[:25]:
             when = event.get('start', {}).get('dateTime')
             label = datetime.fromisoformat(when.replace('Z', '+00:00')).astimezone(TZ).strftime('%H:%M') if when else 'Dia inteiro'
-            status = event.get('extendedProperties', {}).get('private', {}).get('status', 'Agendado')
+            status = ((event.get('extendedProperties') or {}).get('private') or {}).get('status') or 'Agendado'
             lines.append(label + ' — ' + (event.get('summary') or 'Consulta')[:100] + ' · ' + status)
         if not events:
             lines.append('Nenhum agendamento neste dia.')
