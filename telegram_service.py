@@ -1,4 +1,4 @@
-"""Private Telegram scheduling. No patient text is sent to an AI provider."""
+"""Private Telegram scheduling with a constrained conversational planner."""
 import asyncio
 import hashlib
 import hmac
@@ -16,6 +16,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 from calendar_service import CalendarError, list_events
 from myla_service import create_checked, slots
+from telegram_ai import plan as ai_plan, forget as ai_forget
 
 router = APIRouter(prefix='/telegram', tags=['Telegram'])
 TZ = ZoneInfo('America/Sao_Paulo')
@@ -125,6 +126,8 @@ async def prompt(chat, state):
         await send(chat, 'Escolha um horário futuro dentro do atendimento: segunda a sexta, 16h–20h; sábado, 7h–13h. Para mudar o dia, escreva a nova data e o horário.')
         return
     state['waiting'] = 'confirm'
+    # Old preview buttons must never confirm a later edited draft.
+    state['nonce'] = secrets.token_hex(16)
     d['start'], d['end'] = start.isoformat(), end.isoformat()
     await send(chat, f"Confirma o agendamento?\nPaciente: {d['name']}\nDia: {start:%d/%m/%Y}\nHorário: {start:%H:%M}–{end:%H:%M}\nDuração: {d['duration']} minutos",
                {'inline_keyboard': [[{'text': 'Confirmar agendamento', 'callback_data': 'confirm:' + state['nonce']},
@@ -169,11 +172,51 @@ async def handle(update):
     value = normalized(text)
     if value in ('/start', '/menu', 'menu', '/cancelar', 'cancelar', 'cancelar operacao'):
         SESSIONS.pop(key, None)
+        ai_forget(uid)
         await send(uid, 'Sou a Myla. Consulte a agenda ou faça um agendamento pelos botões. Também pode escrever: Marque Ana amanhã às 17h por 30 minutos.', MENU)
         return
     if message.get('photo') or message.get('voice') or message.get('document'):
         await send(uid, 'Nesta primeira etapa, envie os dados por texto. A leitura de imagens e áudios ainda não está habilitada.')
         return
+    direct = value in ('agenda de hoje', '/agenda', 'horarios livres', 'novo agendamento') or value.startswith('/horarios')
+    if text and not update.get('_ai_resolved') and not direct:
+        active = state if state and state.get('waiting') != 'done' else None
+        result = await ai_plan(uid, text, active)
+        if result:
+            intent = result['intent']
+            if intent == 'chat':
+                await send(uid, result['answer'] or 'Como posso ajudar com a agenda?', MENU)
+                return
+            if intent == 'cancel':
+                SESSIONS.pop(key, None)
+                ai_forget(uid)
+                await send(uid, 'Operação cancelada. Nenhuma consulta existente foi alterada.', MENU)
+                return
+            if intent == 'book':
+                if not active or active.get('mode') != 'book':
+                    state = {'mode': 'book', 'draft': {}, 'nonce': secrets.token_hex(16), 'expires': time.monotonic() + 1200}
+                    SESSIONS[key] = state
+                for field in ('name', 'day', 'clock', 'duration'):
+                    if field in result:
+                        state['draft'][field] = result[field]
+                state['expires'] = time.monotonic() + 1200
+                await prompt(uid, state)
+                return
+            if intent in ('agenda', 'slots'):
+                if not result.get('day') and intent == 'slots':
+                    SESSIONS[key] = {'mode': 'slots', 'expires': time.monotonic() + 1200}
+                    await send(uid, 'Para qual dia deseja consultar os horários livres?')
+                    return
+                day = datetime.fromisoformat(result.get('day') or datetime.now(TZ).date().isoformat()).strftime('%d/%m/%Y')
+                routed = dict(update, _ai_resolved=True)
+                routed['message'] = dict(message, text=('agenda ' if intent == 'agenda' else '') + day)
+                if intent == 'slots':
+                    SESSIONS[key] = {'mode': 'slots', 'expires': time.monotonic() + 1200}
+                await handle(routed)
+                return
+        elif not state and not re.match(r'^(marque|marcar|agende|agendar|agenda)\b', value):
+            await send(uid, 'A conversa com IA está temporariamente indisponível. Você pode continuar pelos botões da agenda.', MENU)
+            return
     if value in ('agenda de hoje', '/agenda') or value.startswith('agenda '):
         day = get_day(text) or datetime.now(TZ).date()
         a = datetime.combine(day, datetime.min.time(), TZ)
@@ -202,6 +245,7 @@ async def handle(update):
         SESSIONS.pop(key, None)
         return
     if value == 'novo agendamento' or re.match(r'^(marque|marcar|agende|agendar)\b', value):
+        ai_forget(uid)
         state = {'mode': 'book', 'draft': {}, 'nonce': secrets.token_hex(16), 'expires': time.monotonic() + 1200}
         SESSIONS[key] = state
         if value != 'novo agendamento':
