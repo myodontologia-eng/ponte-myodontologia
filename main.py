@@ -121,3 +121,12 @@ async def migrate_former_calendar():
             await run_in_threadpool(run)
         except Exception as error:
             logging.getLogger("uvicorn.error").error("CALENDAR_MIGRATION incomplete (%s); original calendar unchanged", type(error).__name__)
+
+
+from telegram_service import router as telegram_router, configure_webhook
+app.include_router(telegram_router)
+
+
+@app.on_event("startup")
+async def start_telegram_interaction():
+    await configure_webhook()
