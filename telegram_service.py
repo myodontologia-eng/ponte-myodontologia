@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from calendar_service import CalendarError, list_events, update_event_status
 from myla_service import create_checked, slots
@@ -67,11 +68,30 @@ async def api(method, payload):
         raise HTTPException(502, 'Telegram temporariamente indisponível') from None
 
 
-async def send(chat, text, markup=None):
+async def audit_message(chat, message_id, direction, text, actor='', display_name=''):
+    token = os.getenv('INTERNAL_API_TOKEN', '')
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.post('https://sistema.myodontologia.com/wp-json/myod/v1/telegram/messages',
+                headers={'Authorization': 'Bearer ' + token},
+                json={'chat_id': str(chat), 'message_id': str(message_id), 'direction': direction,
+                      'text': text[:4000], 'actor': actor, 'display_name': display_name[:150]})
+        result = response.json()
+        if response.status_code != 200 or result.get('ok') is not True:
+            raise ValueError()
+        return result
+    except Exception:
+        logging.getLogger(__name__).warning('Telegram inbox unavailable')
+        return None
+
+
+async def send(chat, text, markup=None, actor='myla'):
     body = {'chat_id': chat, 'text': text[:4000], 'protect_content': True}
     if markup:
         body['reply_markup'] = markup
-    return await api('sendMessage', body)
+    result = await api('sendMessage', body)
+    await audit_message(chat, (result or {}).get('message_id') or secrets.token_hex(16), 'out', text, actor)
+    return result
 
 
 def get_day(text, now=None):
@@ -204,6 +224,20 @@ async def handle(update):
         # Do not expose schedule data or automatically grant access.
         await send(uid, f'Acesso à agenda ainda não liberado. Informe ao Dr. Márcio este ID: {uid}.')
         return
+    if not update.get('_ai_resolved'):
+        incoming = message.get('text') or message.get('caption') or ('[Imagem recebida]' if message.get('photo') else '[Mensagem sem texto]')
+        if callback:
+            incoming = '[Botão] ' + callback.get('data', '').split(':')[0]
+        mid = 'cb:' + callback['id'] if callback else str(message.get('message_id', update.get('update_id', 'unknown')))
+        audit = await audit_message(uid, mid, 'in', incoming, 'owner' if str(uid) == owner() else 'secretary',
+                                    ' '.join(str(sender.get(k, '')) for k in ('first_name', 'last_name')).strip())
+        if audit is None:
+            await send(uid, 'Não consegui consultar o painel de conversas. Tente novamente em instantes ou use a agenda no sistema.')
+            return
+        if audit.get('paused'):
+            if callback:
+                await api('answerCallbackQuery', {'callback_query_id': callback['id'], 'text': 'Atendimento com o Dr. Márcio.'})
+            return
     if callback:
         await api('answerCallbackQuery', {'callback_query_id': callback['id']})
     key = str(uid)
@@ -365,6 +399,22 @@ async def webhook(request: Request, x_telegram_bot_api_secret_token: str = Heade
                 await send(uid, error.message if isinstance(error, CalendarError) else 'Confira a data e o horário informados.')
         SEEN[update_id] = now + 86400
     return {'ok': True}
+
+
+class OperatorReply(BaseModel):
+    chat_id: str = Field(pattern=r'^[1-9][0-9]{0,19}$')
+    text: str = Field(min_length=1, max_length=3500)
+
+
+@router.post('/operator-reply')
+async def operator_reply(body: OperatorReply, authorization: str = Header(default='')):
+    token = os.getenv('INTERNAL_API_TOKEN', '')
+    if not token or not hmac.compare_digest(authorization, 'Bearer ' + token):
+        raise HTTPException(403, 'Acesso não autorizado')
+    if not allowed(body.chat_id):
+        raise HTTPException(403, 'Conta Telegram não autorizada')
+    await send(body.chat_id, 'Dr. Márcio: ' + body.text.strip(), actor='operator')
+    return {'sent': True}
 
 
 async def configure_webhook():
