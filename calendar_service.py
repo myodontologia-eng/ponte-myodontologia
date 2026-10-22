@@ -10,7 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
-ALLOWED_STATUSES = ['Agendado', 'Atendido', 'Faltou', 'Remarcado', 'Atendimento atrasado', 'Desmarcou']
+ALLOWED_STATUSES = ['Agendado', 'Aguardando', 'Atendido', 'Faltou', 'Remarcado', 'Atendimento atrasado', 'Desmarcou']
 
 class CalendarError(Exception):
     def __init__(self, code, message):
@@ -164,7 +164,7 @@ def update_event_status(event_id, status, start=None, end=None, user=None, etag=
         updated = request.execute()
         final_event = event | body | updated
         changed = any(event.get(key) != final_event.get(key) for key in ('start', 'end', 'description', 'status')) or previous != status
-        notification = notify_calendar_change('Agenda alterada', final_event, previous=event, user=user) if changed else {'sent': False, 'reason': 'unchanged'}
+        notification = notify_calendar_change('Paciente chegou — aguardando atendimento' if status == 'Aguardando' and previous != status else 'Agenda alterada', final_event, previous=event, user=user) if changed else {'sent': False, 'reason': 'unchanged'}
         return safe_event(final_event) | {'telegram_notification': notification} | {'previous_status': previous, 'new_status': status, 'updated_at': props['updated_at'], 'updated_by': user}
     except HttpError as error:
         translate_error(error)
