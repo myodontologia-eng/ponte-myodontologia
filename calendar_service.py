@@ -1,4 +1,5 @@
 import os
+from appointment_identity import appointment_identity
 import hashlib
 import re
 import logging
@@ -44,7 +45,10 @@ def validate_period(start, end):
         raise CalendarError(422, 'O término deve ser posterior ao início')
 
 def safe_event(event):
-    return {key: event.get(key) for key in ('id', 'summary', 'description', 'start', 'end', 'extendedProperties', 'updated', 'etag', 'status')} | {'calendar_id': calendar_id()}
+    identity = appointment_identity(event)
+    return {key: event.get(key) for key in ('id', 'summary', 'description', 'start', 'end', 'extendedProperties', 'updated', 'etag', 'status')} | {
+        'calendar_id': calendar_id(), 'summary': identity['name'],
+        'patient_name': identity['name'], 'patient_reason': identity['reason']}
 
 def translate_error(error):
     code = int(error.resp.status)
@@ -168,3 +172,4 @@ def update_event_status(event_id, status, start=None, end=None, user=None, etag=
         return safe_event(final_event) | {'telegram_notification': notification} | {'previous_status': previous, 'new_status': status, 'updated_at': props['updated_at'], 'updated_by': user}
     except HttpError as error:
         translate_error(error)
+

@@ -18,11 +18,12 @@ SCHEMA = {
         'intent': {'type': 'string', 'enum': ['chat', 'book', 'agenda', 'slots', 'cancel']},
         'answer': {'type': 'string'},
         'name': {'type': ['string', 'null']},
+        'reason': {'type': ['string', 'null']},
         'day': {'type': ['string', 'null']},
         'clock': {'type': ['string', 'null']},
         'duration': {'type': ['integer', 'null']},
     },
-    'required': ['intent', 'answer', 'name', 'day', 'clock', 'duration'],
+    'required': ['intent', 'answer', 'name', 'reason', 'day', 'clock', 'duration'],
     'additionalProperties': False,
 }
 
@@ -33,7 +34,7 @@ def validate_plan(data):
     if not isinstance(data.get('answer'), str):
         raise ValueError('invalid answer')
     result = {'intent': data['intent'], 'answer': data['answer'][:2000]}
-    for key, limit in [('name', 150), ('day', 10), ('clock', 5)]:
+    for key, limit in [('name', 150), ('reason', 200), ('day', 10), ('clock', 5)]:
         v = data.get(key)
         if v is not None and (not isinstance(v, str) or not 0 < len(v.strip()) <= limit):
             raise ValueError('invalid field')
@@ -87,7 +88,7 @@ async def plan(uid, text, state=None):
     # Send only this authorized user's messages and current unsaved draft.
     # Never send calendar listings, credentials, photos or other users' history.
     draft = {k: v for k, v in (state or {}).get('draft', {}).items()
-             if k in ('name', 'day', 'clock', 'duration')}
+             if k in ('name', 'reason', 'day', 'clock', 'duration')}
     approved = {k: v.replace('Horários de TESTE', 'Horários') for k, v in TOPICS.items()
                 if k not in ('agendar', 'saudacao')}
     system = (
@@ -101,6 +102,7 @@ async def plan(uid, text, state=None):
         'slots solicita horários livres; cancel cancela apenas a operação em andamento, nunca uma consulta existente. '
         'Para desmarcar/remarcar/alterar status de consulta existente, use chat e oriente usar o painel da agenda nesta versão. '
         'Uma confirmação em texto deve usar book; somente o botão do servidor pode efetivar a gravação. '
+        'name contém somente o nome do paciente, sem procedimento, motivo ou horário. reason contém o motivo da consulta separado. '
         'Use null para dados ausentes. Não invente nome, dia, horário ou duração. '
         'Preserve dados do rascunho que não foram corrigidos explicitamente. '
         'Resolva hoje, amanhã, dias da semana e datas relativas com base na data local fornecida. '
@@ -139,3 +141,4 @@ async def plan(uid, text, state=None):
         # Never log provider payloads, user content or exception URLs.
         logging.getLogger(__name__).warning('Telegram AI temporarily unavailable')
         return None
+

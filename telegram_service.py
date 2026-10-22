@@ -15,6 +15,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
+from appointment_identity import appointment_identity, appointment_label
 from calendar_service import CalendarError, list_events, update_event_status
 from myla_service import create_checked, slots, reschedule_checked
 from telegram_ai import plan as ai_plan, forget as ai_forget
@@ -152,7 +153,7 @@ async def prompt(chat, state):
     state['nonce'] = secrets.token_hex(16)
     d['start'], d['end'] = start.isoformat(), end.isoformat()
     question = 'Confirma a remarcação?' if state.get('mode') == 'reschedule' else 'Confirma o agendamento?'
-    await send(chat, f"{question}\nPaciente: {d['name']}\nDia: {start:%d/%m/%Y}\nHorário: {start:%H:%M}–{end:%H:%M}\nDuração: {d['duration']} minutos",
+    await send(chat, f"{question}\nPaciente: {d['name']}\nMotivo: {d.get('reason') or 'Não informado'}\nDia: {start:%d/%m/%Y}\nHorário: {start:%H:%M}–{end:%H:%M}\nDuração: {d['duration']} minutos",
                {'inline_keyboard': [[{'text': 'Confirmar agendamento', 'callback_data': 'confirm:' + state['nonce']},
                                      {'text': 'Cancelar', 'callback_data': 'cancel:' + state['nonce']}]]})
 
@@ -183,7 +184,7 @@ async def arrival_list(uid):
     rows = []
     for index, event in enumerate(eligible[:60]):
         start = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00')).astimezone(TZ)
-        label = start.strftime('%H:%M') + ' — ' + (event.get('summary') or 'Consulta')[:80]
+        label = start.strftime('%H:%M') + ' — ' + appointment_label(event)[:120]
         rows.append([{'text': label, 'callback_data': f'arrival:{nonce}:{index}'}])
     await send(uid, 'Quem chegou? Selecione o agendamento para confirmar Aguardando.', {'inline_keyboard': rows})
 
@@ -214,7 +215,7 @@ async def arrival_callback(uid, data, state):
     await send(uid, 'Aguardando — paciente chegou e espera atendimento.\n' + delivery, MENU)
 
 
-async def status_list(uid, day):
+async def status_list(uid, day, agenda=False):
     a = datetime.combine(day, datetime.min.time(), TZ)
     events = await run_in_threadpool(list_events, time_min=a.isoformat(), time_max=(a + timedelta(days=1)).isoformat())
     events = [e for e in events if e.get('status') != 'cancelled' and e.get('id') and e.get('etag') and e.get('start', {}).get('dateTime')]
@@ -226,8 +227,13 @@ async def status_list(uid, day):
     rows = []
     for i, event in enumerate(events[:60]):
         at = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00')).astimezone(TZ)
-        rows.append([{'text': at.strftime('%H:%M') + ' — ' + (event.get('summary') or 'Consulta')[:80], 'callback_data': f'choose:{nonce}:{i}'}])
-    await send(uid, f'Qual agendamento de {day:%d/%m/%Y} deseja alterar?', {'inline_keyboard': rows})
+        status = ((event.get('extendedProperties') or {}).get('private') or {}).get('status') or 'Agendado'
+        label = at.strftime('%H:%M') + ' — ' + appointment_label(event) + ' · ' + status
+        rows.append([{'text': label[:180], 'callback_data': f'choose:{nonce}:{i}'}])
+    heading = f'Agenda de {day:%d/%m/%Y}\nToque no paciente para alterar a situação.' if agenda else f'Qual agendamento de {day:%d/%m/%Y} deseja alterar?'
+    await send(uid, heading, {'inline_keyboard': rows})
+    if len(events) > 60:
+        await send(uid, 'Exibindo os primeiros 60 agendamentos. Consulte a agenda no sistema para ver os demais.', MENU)
 
 
 async def status_callback(uid, data, state):
@@ -248,7 +254,7 @@ async def status_callback(uid, data, state):
         state['nonce'] = secrets.token_hex(12)
         statuses = ['Agendado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']
         rows = [[{'text': label, 'callback_data': f"status:{state['nonce']}:{label}"}] for label in statuses]
-        await send(uid, 'Agendamento: ' + state['selected'].get('summary', 'Consulta')[:150] + '\nQual é a nova situação?', {'inline_keyboard': rows})
+        await send(uid, 'Agendamento: ' + appointment_label(state['selected'])[:250] + '\nQual é a nova situação?', {'inline_keyboard': rows})
         return
     if not state.get('selected'):
         return
@@ -258,12 +264,12 @@ async def status_callback(uid, data, state):
             return
         event = state['selected']
         if status == 'Remarcado':
-            state.update(mode='reschedule', draft={'name': event.get('summary') or 'Consulta'}, waiting='day')
+            state.update(mode='reschedule', draft={'name': appointment_identity(event)['name'], 'reason': appointment_identity(event)['reason']}, waiting='day')
             await send(uid, 'Para qual nova data? Informe a data, o horário e a duração. Exemplo: amanhã às 17h por 30 minutos.')
             return
         state.update(target_status=status, waiting='status_confirm', nonce=secrets.token_hex(12))
         at = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00')).astimezone(TZ)
-        await send(uid, f"Confirma alterar para {status}?\n{event.get('summary', 'Consulta')[:150]}\n{at:%d/%m/%Y às %H:%M}",
+        await send(uid, f"Confirma alterar para {status}?\n{appointment_label(event)[:250]}\n{at:%d/%m/%Y às %H:%M}",
                    {'inline_keyboard': [[{'text': 'Confirmar alteração', 'callback_data': 'apply:' + state['nonce']},
                                          {'text': 'Cancelar', 'callback_data': 'cancel:' + state['nonce']}]]})
         return
@@ -328,7 +334,7 @@ async def handle(update):
                 event = state['selected']
                 await run_in_threadpool(reschedule_checked, event_id=event['id'], start=d['start'], end=d['end'], etag=event['etag'], user='telegram:' + key)
             else:
-                await run_in_threadpool(create_checked, summary=d['name'], description='Agendado pela equipe via Telegram.',
+                await run_in_threadpool(create_checked, summary=d['name'], description='Nome: ' + d['name'] + '\nMotivo: ' + (d.get('reason') or 'Não informado') + '\nAgendado pela equipe via Telegram.',
                                             start=d['start'], end=d['end'], idempotency_key='telegram-' + nonce, user='telegram:' + key)
             state['waiting'] = 'done'
             await send(uid, 'Remarcação salva na agenda central.' if state.get('mode') == 'reschedule' else 'Agendamento salvo na agenda central.', MENU)
@@ -394,7 +400,7 @@ async def handle(update):
                 if not active or active.get('mode') != 'book':
                     state = {'mode': 'book', 'draft': {}, 'nonce': secrets.token_hex(16), 'expires': time.monotonic() + 1200}
                     SESSIONS[key] = state
-                for field in ('name', 'day', 'clock', 'duration'):
+                for field in ('name', 'reason', 'day', 'clock', 'duration'):
                     if field in result:
                         state['draft'][field] = result[field]
                 state['expires'] = time.monotonic() + 1200
@@ -417,17 +423,7 @@ async def handle(update):
             return
     if value in ('agenda de hoje', '/agenda') or value.startswith('agenda '):
         day = get_day(text) or datetime.now(TZ).date()
-        a = datetime.combine(day, datetime.min.time(), TZ)
-        events = await run_in_threadpool(list_events, time_min=a.isoformat(), time_max=(a + timedelta(days=1)).isoformat())
-        lines = [f'Agenda de {day:%d/%m/%Y}']
-        for event in events[:25]:
-            when = event.get('start', {}).get('dateTime')
-            label = datetime.fromisoformat(when.replace('Z', '+00:00')).astimezone(TZ).strftime('%H:%M') if when else 'Dia inteiro'
-            status = ((event.get('extendedProperties') or {}).get('private') or {}).get('status') or 'Agendado'
-            lines.append(label + ' — ' + (event.get('summary') or 'Consulta')[:100] + ' · ' + status)
-        if not events:
-            lines.append('Nenhum agendamento neste dia.')
-        await send(uid, '\n'.join(lines), MENU)
+        await status_list(uid, day, agenda=True)
         return
     if value == 'horarios livres' or value.startswith('/horarios'):
         SESSIONS[key] = {'mode': 'slots', 'expires': time.monotonic() + 1200}
@@ -531,3 +527,4 @@ async def configure_webhook():
         logging.getLogger(__name__).info('Telegram interaction webhook configured')
     except HTTPException:
         logging.getLogger(__name__).warning('Telegram webhook configuration failed')
+

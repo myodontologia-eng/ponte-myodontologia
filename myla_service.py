@@ -156,7 +156,7 @@ def book(body):
         lines += ["Cadastro incompleto — equipe deve completar: " + ", ".join(missing)]
     if p["responsible"]:
         lines += ["Responsável: " + p["responsible"], "Telefone do responsável: " + p["responsible_phone"]]
-    return create_checked(summary=("[DADOS PENDENTES] " if missing else "") + (p["reason"] or "Consulta") + " - " + (p["name"] or "Nome não informado"), description="\n".join(lines), start=start.isoformat(), end=end.isoformat(), idempotency_key="myla-" + body.request_id, user="myla-site")
+    return create_checked(summary=p["name"], description="\n".join(lines), start=start.isoformat(), end=end.isoformat(), idempotency_key="myla-" + body.request_id, user="myla-site")
 
 def gemini_error(code):
     messages = {400: "Gemini recusou a configuração. Confira a chave e o modelo.", 401: "Chave Gemini recusada.", 403: "Chave Gemini sem permissão.", 404: "Modelo gemini-3.8-flash indisponível para esta chave (HTTP 404).", 429: "Limite ou saldo da API Gemini atingido."}
@@ -204,3 +204,4 @@ def reschedule_checked(event_id, start, end, etag, user=None):
         if not free(a, b, others):
             raise CalendarError(409, "O novo horário está ocupado. Escolha outro")
         return update_event_status(event_id=event_id, status="Remarcado", start=start, end=end, etag=etag, user=user)
+
