@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
-from calendar_service import CalendarError, list_events
+from calendar_service import CalendarError, list_events, update_event_status
 from myla_service import create_checked, slots
 from telegram_ai import plan as ai_plan, forget as ai_forget
 
@@ -24,7 +24,8 @@ LOCK = asyncio.Lock()
 SESSIONS = {}
 SEEN = {}
 MENU = {'keyboard': [[{'text': 'Agenda de hoje'}, {'text': 'Horários livres'}],
-                     [{'text': 'Novo agendamento'}, {'text': 'Cancelar operação'}]],
+                     [{'text': 'Novo agendamento'}, {'text': 'Aguardando'}],
+                     [{'text': 'Cancelar operação'}]],
         'resize_keyboard': True}
 
 
@@ -134,6 +135,63 @@ async def prompt(chat, state):
                                      {'text': 'Cancelar', 'callback_data': 'cancel:' + state['nonce']}]]})
 
 
+async def arrival_list(uid):
+    """Only today's active timed appointments are eligible for check-in."""
+    now = datetime.now(TZ)
+    a = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    events = await run_in_threadpool(list_events, time_min=a.isoformat(), time_max=(a + timedelta(days=1)).isoformat())
+    eligible = []
+    for event in events:
+        status = event.get('extendedProperties', {}).get('private', {}).get('status', 'Agendado')
+        if event.get('status') == 'cancelled' or status not in ('Agendado', 'Remarcado', 'Atendimento atrasado'):
+            continue
+        value = event.get('start', {}).get('dateTime')
+        if not value or not event.get('id') or not event.get('etag'):
+            continue
+        start = datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(TZ)
+        if start.date() == now.date():
+            eligible.append(event)
+    if not eligible:
+        await send(uid, 'Nenhum agendamento de hoje disponível para marcar como Aguardando.', MENU)
+        return
+    # Telegram callback data contains only a random reference, never patient data.
+    nonce = secrets.token_hex(12)
+    SESSIONS[str(uid)] = {'mode': 'arrival', 'nonce': nonce, 'events': eligible,
+                         'expires': time.monotonic() + 600}
+    rows = []
+    for index, event in enumerate(eligible[:60]):
+        start = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00')).astimezone(TZ)
+        label = start.strftime('%H:%M') + ' — ' + (event.get('summary') or 'Consulta')[:80]
+        rows.append([{'text': label, 'callback_data': f'arrival:{nonce}:{index}'}])
+    await send(uid, 'Quem chegou? Selecione o agendamento para confirmar Aguardando.', {'inline_keyboard': rows})
+
+
+async def arrival_callback(uid, data, state):
+    parts = data.split(':')
+    if len(parts) != 3 or not state or state.get('mode') != 'arrival' or parts[1] != state.get('nonce'):
+        await send(uid, 'Esta seleção expirou. Toque em Aguardando novamente.', MENU)
+        return
+    try:
+        index = int(parts[2])
+        if index < 0:
+            raise ValueError()
+        event = state['events'][index]
+    except (ValueError, IndexError, KeyError):
+        await send(uid, 'Seleção inválida. Toque em Aguardando novamente.', MENU)
+        return
+    start = datetime.fromisoformat(event['start']['dateTime'].replace('Z', '+00:00')).astimezone(TZ)
+    if start.date() != datetime.now(TZ).date():
+        SESSIONS.pop(str(uid), None)
+        await send(uid, 'Este agendamento não é de hoje. Atualize a agenda.', MENU)
+        return
+    result = await run_in_threadpool(update_event_status, event_id=event['id'], status='Aguardando',
+                                    etag=event['etag'], user='telegram:' + str(uid))
+    SESSIONS.pop(str(uid), None)
+    notification = result.get('telegram_notification', {})
+    delivery = 'Aviso enviado ao Dr. Márcio.' if notification.get('sent') else 'O status foi salvo, mas o aviso não foi confirmado; avise o Dr. Márcio diretamente.'
+    await send(uid, 'Aguardando — paciente chegou e espera atendimento.\n' + delivery, MENU)
+
+
 async def handle(update):
     callback = update.get('callback_query')
     message = (callback or {}).get('message') or update.get('message') or {}
@@ -154,6 +212,9 @@ async def handle(update):
         SESSIONS.pop(key, None)
         state = None
     if callback:
+        if callback.get('data', '').startswith('arrival:'):
+            await arrival_callback(uid, callback['data'], state)
+            return
         action, _, nonce = callback.get('data', '').partition(':')
         if not state or nonce != state.get('nonce'):
             await send(uid, 'Esta confirmação expirou. Comece um novo agendamento.', MENU)
@@ -177,6 +238,9 @@ async def handle(update):
         return
     if message.get('photo') or message.get('voice') or message.get('document'):
         await send(uid, 'Nesta primeira etapa, envie os dados por texto. A leitura de imagens e áudios ainda não está habilitada.')
+        return
+    if value in ('aguardando', '/aguardando', 'paciente chegou', 'marcar aguardando'):
+        await arrival_list(uid)
         return
     direct = value in ('agenda de hoje', '/agenda', 'horarios livres', 'novo agendamento') or value.startswith('/horarios')
     if text and not update.get('_ai_resolved') and not direct:
@@ -225,7 +289,8 @@ async def handle(update):
         for event in events[:25]:
             when = event.get('start', {}).get('dateTime')
             label = datetime.fromisoformat(when.replace('Z', '+00:00')).astimezone(TZ).strftime('%H:%M') if when else 'Dia inteiro'
-            lines.append(label + ' — ' + (event.get('summary') or 'Consulta')[:100])
+            status = event.get('extendedProperties', {}).get('private', {}).get('status', 'Agendado')
+            lines.append(label + ' — ' + (event.get('summary') or 'Consulta')[:100] + ' · ' + status)
         if not events:
             lines.append('Nenhum agendamento neste dia.')
         await send(uid, '\n'.join(lines), MENU)
