@@ -1,6 +1,9 @@
 import os
 import hashlib
 import re
+import logging
+import httpx
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -74,6 +77,40 @@ def status_description(description, status):
     pattern = r'(?im)^\s*Status:[^\r\n]*'
     return re.sub(pattern, lambda _: line, description) if re.search(pattern, description) else (description.rstrip() + '\n' + line).lstrip()
 
+
+def notify_calendar_change(action, event, previous=None, user=None):
+    """Send only operational metadata; never patient names or clinical details."""
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+    chat_id = os.getenv('DR_MARCIO_CHAT_ID', '').strip()
+    if not token or not chat_id:
+        return {'sent': False, 'reason': 'not_configured'}
+    def display_time(item):
+        value = (item or {}).get('dateTime')
+        if value:
+            return parse_time(value).astimezone(ZoneInfo('America/Sao_Paulo')).strftime('%d/%m/%Y às %H:%M')
+        return (item or {}).get('date', 'Não informado')
+    try:
+        status = event.get('extendedProperties', {}).get('private', {}).get('status', 'Agendado')
+        lines = ['MY Odontologia — ' + action, 'Horário: ' + display_time(event.get('start')), 'Status: ' + status]
+        if previous:
+            old_status = previous.get('extendedProperties', {}).get('private', {}).get('status')
+            if old_status and old_status != status:
+                lines.append('Status anterior: ' + old_status)
+            if previous.get('start') != event.get('start'):
+                lines.append('Horário anterior: ' + display_time(previous.get('start')))
+        lines.append('Confira os detalhes na agenda: https://sistema.myodontologia.com/')
+        with httpx.Client(timeout=httpx.Timeout(8, connect=3)) as client:
+            response = client.post('https://api.telegram.org/bot' + token + '/sendMessage', json={
+                'chat_id': chat_id, 'text': '\n'.join(lines), 'link_preview_options': {'is_disabled': True}})
+            if response.status_code != 200 or response.json().get('ok') is not True:
+                logging.getLogger(__name__).warning('Calendar Telegram notification rejected (HTTP %s)', response.status_code)
+                return {'sent': False, 'reason': 'telegram_rejected'}
+        return {'sent': True}
+    except Exception:
+        # Do not log exception text: HTTP exceptions may contain the bot token.
+        logging.getLogger(__name__).warning('Calendar Telegram notification unavailable')
+        return {'sent': False, 'reason': 'unavailable'}
+
 def create_event(summary, description, start, end, idempotency_key, user=None):
     validate_period(start, end)
     cid = calendar_id()
@@ -85,15 +122,18 @@ def create_event(summary, description, start, end, idempotency_key, user=None):
     body = {'id': event_id, 'summary': summary, 'description': status_description(description, 'Agendado'), 'start': {'dateTime': start}, 'end': {'dateTime': end}, 'extendedProperties': {'private': private}}
     try:
         service = get_calendar_service()
+        created = False
         try:
             result = service.events().insert(calendarId=cid, body=body, sendUpdates='none').execute()
+            created = True
         except HttpError as error:
             if int(error.resp.status) != 409:
                 raise
             result = service.events().get(calendarId=cid, eventId=event_id).execute()
             if result.get('extendedProperties', {}).get('private', {}).get('request_hash') != fingerprint:
                 raise CalendarError(409, 'Identificador já utilizado para outro agendamento')
-        return safe_event(result)
+        notification = notify_calendar_change('Novo agendamento', result, user=user) if created else {'sent': False, 'reason': 'duplicate'}
+        return safe_event(result) | {'telegram_notification': notification}
     except HttpError as error:
         translate_error(error)
 
@@ -122,6 +162,9 @@ def update_event_status(event_id, status, start=None, end=None, user=None, etag=
         request = service.events().patch(calendarId=cid, eventId=event_id, body=body, sendUpdates='none')
         request.headers['If-Match'] = event['etag']
         updated = request.execute()
-        return safe_event(event | body | updated) | {'previous_status': previous, 'new_status': status, 'updated_at': props['updated_at'], 'updated_by': user}
+        final_event = event | body | updated
+        changed = any(event.get(key) != final_event.get(key) for key in ('start', 'end', 'description', 'status')) or previous != status
+        notification = notify_calendar_change('Agenda alterada', final_event, previous=event, user=user) if changed else {'sent': False, 'reason': 'unchanged'}
+        return safe_event(final_event) | {'telegram_notification': notification} | {'previous_status': previous, 'new_status': status, 'updated_at': props['updated_at'], 'updated_by': user}
     except HttpError as error:
         translate_error(error)
