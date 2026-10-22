@@ -182,3 +182,25 @@ async def faq(topic):
         return {"answer": answer[:2000], "model": model, "personal_data_sent": False}
     except httpx.HTTPError as error:
         raise HTTPException(504, "Gemini: falha na " + stage + " — " + type(error).__name__ + ". Tente novamente.")
+
+
+def reschedule_checked(event_id, start, end, etag, user=None):
+    """Reschedule the same event after checking its version and occupied period."""
+    from calendar_service import update_event_status
+    with WRITE_LOCK:
+        a, b = parse_time(start), parse_time(end)
+        if b <= a:
+            raise CalendarError(422, "Término deve ser posterior ao início")
+        try:
+            current = get_calendar_service().events().get(calendarId=calendar_id(), eventId=event_id).execute()
+        except HttpError:
+            raise CalendarError(502, "Não foi possível conferir o agendamento")
+        if current.get("etag") != etag:
+            raise CalendarError(412, "O agendamento mudou. Consulte a agenda novamente antes de remarcar")
+        if current.get("status") == "cancelled":
+            raise CalendarError(409, "Este agendamento foi desmarcado. Atualize a agenda")
+        events = list_events(time_min=start, time_max=end)
+        others = [event for event in events if event.get("id") != event_id]
+        if not free(a, b, others):
+            raise CalendarError(409, "O novo horário está ocupado. Escolha outro")
+        return update_event_status(event_id=event_id, status="Remarcado", start=start, end=end, etag=etag, user=user)
