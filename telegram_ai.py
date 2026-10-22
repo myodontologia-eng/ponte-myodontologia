@@ -1,4 +1,5 @@
 """Constrained conversation planner; it has no calendar write tools."""
+import asyncio
 import json
 import logging
 import os
@@ -59,6 +60,21 @@ def forget(uid):
     HISTORY.pop(str(uid), None)
 
 
+async def generate_with_retry(client, url, key, payload):
+    """Retry transient provider failures only; generation cannot write bookings."""
+    async with asyncio.timeout(24):
+        for attempt in range(3):
+            try:
+                response = await client.post(url, headers={'x-goog-api-key': key}, json=payload)
+            except httpx.TransportError:
+                if attempt == 2:
+                    raise
+            else:
+                if response.status_code not in (500, 502, 503, 504) or attempt == 2:
+                    return response
+            await asyncio.sleep(2 ** attempt)
+
+
 async def plan(uid, text, state=None):
     key = os.getenv('GEMINI_API_KEY', '').strip()
     if not key:
@@ -101,11 +117,11 @@ async def plan(uid, text, state=None):
     if not re.fullmatch(r'[A-Za-z0-9._-]+', model):
         return None
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5)) as client:
-            response = await client.post(
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=4)) as client:
+            response = await generate_with_retry(client,
                 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent',
-                headers={'x-goog-api-key': key},
-                json={'systemInstruction': {'parts': [{'text': system}]},
+                key,
+                {'systemInstruction': {'parts': [{'text': system}]},
                       'contents': [{'role': 'user', 'parts': [{'text': json.dumps(content, ensure_ascii=False)}]}],
                       'generationConfig': {'responseMimeType': 'application/json', 'responseJsonSchema': SCHEMA,
                                            'temperature': 0.2, 'maxOutputTokens': 2048}})
