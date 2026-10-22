@@ -62,6 +62,24 @@ class TelegramAgendaTest(unittest.IsolatedAsyncioTestCase):
             listing.assert_awaited_once_with(123, self.day, agenda=True)
             ai.assert_not_awaited()
 
+    async def test_free_slot_button_prepares_booking_without_reserving(self):
+        tomorrow = self.day + timedelta(days=1)
+        available = {'slots': [{'start': tomorrow.isoformat() + 'T17:00:00-03:00', 'label': '17:00'}]}
+        with patch.object(telegram, 'slots', return_value=available), patch.object(telegram, 'send', new_callable=AsyncMock) as send, patch.object(telegram, 'create_checked') as create:
+            await telegram.free_slots_list(123, tomorrow)
+            button = send.call_args.args[2]['inline_keyboard'][0][0]
+            self.assertEqual(button['text'], '17:00')
+            await telegram.free_slot_callback(123, button['callback_data'], telegram.SESSIONS['123'])
+            state = telegram.SESSIONS['123']
+            self.assertEqual(state['draft'], {'day': tomorrow.isoformat(), 'clock': '17:00'})
+            self.assertEqual(state['waiting'], 'name')
+            create.assert_not_called()
+
+    async def test_expired_free_slot_button_is_rejected(self):
+        with patch.object(telegram, 'send', new_callable=AsyncMock), patch.object(telegram, 'prompt', new_callable=AsyncMock) as prompt:
+            await telegram.free_slot_callback(123, 'slot:old:0', {'mode': 'slot_choice', 'nonce': 'new'})
+            prompt.assert_not_awaited()
+
 
 if __name__ == '__main__':
     unittest.main()

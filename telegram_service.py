@@ -281,6 +281,49 @@ async def status_callback(uid, data, state):
         await send(uid, 'Situação salva: ' + state['target_status'] + '.\n' + note, MENU)
 
 
+async def free_slots_list(uid, day):
+    result = await run_in_threadpool(slots, day=day.isoformat())
+    available = result.get('slots') or []
+    if not available:
+        SESSIONS.pop(str(uid), None)
+        await send(uid, f'Horários livres em {day:%d/%m/%Y}: nenhum disponível.', MENU)
+        return
+    nonce = secrets.token_hex(12)
+    SESSIONS[str(uid)] = {'mode': 'slot_choice', 'slots': available, 'nonce': nonce,
+                          'expires': time.monotonic() + 600}
+    buttons = [{'text': item['label'], 'callback_data': f'slot:{nonce}:{index}'}
+               for index, item in enumerate(available)]
+    rows = [buttons[index:index + 4] for index in range(0, len(buttons), 4)]
+    await send(uid, f'Horários livres em {day:%d/%m/%Y}\nToque no horário desejado. A duração e a disponibilidade completa serão conferidas antes de salvar.',
+               {'inline_keyboard': rows})
+
+
+async def free_slot_callback(uid, data, state):
+    parts = data.split(':')
+    if not state or state.get('mode') != 'slot_choice' or len(parts) != 3 or parts[1] != state.get('nonce'):
+        await send(uid, 'Estes horários expiraram. Consulte Horários livres novamente.', MENU)
+        return
+    try:
+        index = int(parts[2])
+        if index < 0:
+            raise ValueError()
+        start = datetime.fromisoformat(state['slots'][index]['start']).astimezone(TZ)
+    except (ValueError, IndexError, KeyError):
+        await send(uid, 'Horário inválido. Consulte Horários livres novamente.', MENU)
+        return
+    if start <= datetime.now(TZ):
+        SESSIONS.pop(str(uid), None)
+        await send(uid, 'Este horário já passou. Consulte Horários livres novamente.', MENU)
+        return
+    draft = {'day': start.date().isoformat(), 'clock': start.strftime('%H:%M')}
+    state = {'mode': 'book', 'draft': draft, 'nonce': secrets.token_hex(16),
+             'expires': time.monotonic() + 1200}
+    SESSIONS[str(uid)] = state
+    ai_forget(uid)
+    await send(uid, f'Horário escolhido: {start:%d/%m/%Y às %H:%M}. Ainda não reservado.')
+    await prompt(uid, state)
+
+
 async def handle(update):
     callback = update.get('callback_query')
     message = (callback or {}).get('message') or update.get('message') or {}
@@ -315,6 +358,9 @@ async def handle(update):
         SESSIONS.pop(key, None)
         state = None
     if callback:
+        if callback.get('data', '').startswith('slot:'):
+            await free_slot_callback(uid, callback['data'], state)
+            return
         if callback.get('data', '').startswith(('choose:', 'status:', 'apply:')):
             await status_callback(uid, callback['data'], state)
             return
@@ -434,10 +480,7 @@ async def handle(update):
         if not day:
             await send(uid, 'Informe o dia: hoje, amanhã ou 23/10/2026.')
             return
-        result = await run_in_threadpool(slots, day=day.isoformat())
-        labels = ', '.join(s['label'] for s in result['slots'])
-        await send(uid, f'Horários livres em {day:%d/%m/%Y}:\n' + (labels or 'Nenhum disponível.') + '\nDisponibilidade em intervalos de 15 minutos; a duração completa será conferida ao salvar.', MENU)
-        SESSIONS.pop(key, None)
+        await free_slots_list(uid, day)
         return
     if value == 'novo agendamento' or re.match(r'^(marque|marcar|agende|agendar)\b', value):
         ai_forget(uid)
