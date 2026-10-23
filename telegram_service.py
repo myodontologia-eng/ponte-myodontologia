@@ -27,9 +27,9 @@ SESSIONS = {}
 SEEN = {}
 MENU = {'keyboard': [[{'text': 'Agenda de hoje'}, {'text': 'Horários livres'}],
                      [{'text': 'Novo agendamento'}, {'text': 'Alterar agendamento'}],
-                     [{'text': 'Aguardando'}],
+                     [{'text': '📅 Agenda da semana'}, {'text': 'Aguardando'}],
                      [{'text': 'Cancelar operação'}]],
-        'resize_keyboard': True}
+        'resize_keyboard': True, 'is_persistent': True}
 
 
 def normalized(text):
@@ -215,12 +215,30 @@ async def arrival_callback(uid, data, state):
     await send(uid, 'Aguardando — paciente chegou e espera atendimento.\n' + delivery, MENU)
 
 
-async def status_list(uid, day, agenda=False):
+def week_navigation(day):
+    return [[{'text': 'Ver horários livres', 'callback_data': 'weekslots:' + day.isoformat()}],
+            [{'text': 'Voltar à semana', 'callback_data': 'weekmenu:' + day.isoformat()}]]
+
+
+async def week_menu(uid, day=None):
+    day = day or datetime.now(TZ).date()
+    monday = day - timedelta(days=day.weekday())
+    names = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
+    rows = [[{'text': f'{name} — {(monday + timedelta(days=i)):%d/%m}',
+              'callback_data': 'weekday:' + (monday + timedelta(days=i)).isoformat()}]
+            for i, name in enumerate(names)]
+    rows.append([{'text': '← Semana anterior', 'callback_data': 'weekmenu:' + (monday - timedelta(days=7)).isoformat()},
+                 {'text': 'Próxima semana →', 'callback_data': 'weekmenu:' + (monday + timedelta(days=7)).isoformat()}])
+    SESSIONS.pop(str(uid), None)
+    await send(uid, f'Agenda da semana — {monday:%d/%m} a {(monday + timedelta(days=5)):%d/%m/%Y}\nEscolha o dia. Cada consulta busca a agenda atualizada.', {'inline_keyboard': rows})
+
+
+async def status_list(uid, day, agenda=False, weekly=False):
     a = datetime.combine(day, datetime.min.time(), TZ)
     events = await run_in_threadpool(list_events, time_min=a.isoformat(), time_max=(a + timedelta(days=1)).isoformat())
     events = [e for e in events if e.get('status') != 'cancelled' and e.get('id') and e.get('etag') and e.get('start', {}).get('dateTime')]
     if not events:
-        await send(uid, f'Nenhum agendamento em {day:%d/%m/%Y}.', MENU)
+        await send(uid, f'Nenhum agendamento em {day:%d/%m/%Y}.', {'inline_keyboard': week_navigation(day)} if weekly else MENU)
         return
     nonce = secrets.token_hex(12)
     SESSIONS[str(uid)] = {'mode': 'status', 'events': events, 'nonce': nonce, 'expires': time.monotonic() + 600}
@@ -230,6 +248,8 @@ async def status_list(uid, day, agenda=False):
         status = ((event.get('extendedProperties') or {}).get('private') or {}).get('status') or 'Agendado'
         label = at.strftime('%H:%M') + ' — ' + appointment_label(event) + ' · ' + status
         rows.append([{'text': label[:180], 'callback_data': f'choose:{nonce}:{i}'}])
+    if weekly:
+        rows.extend(week_navigation(day))
     heading = f'Agenda de {day:%d/%m/%Y}\nToque no paciente para alterar a situação.' if agenda else f'Qual agendamento de {day:%d/%m/%Y} deseja alterar?'
     await send(uid, heading, {'inline_keyboard': rows})
     if len(events) > 60:
@@ -281,12 +301,12 @@ async def status_callback(uid, data, state):
         await send(uid, 'Situação salva: ' + state['target_status'] + '.\n' + note, MENU)
 
 
-async def free_slots_list(uid, day):
+async def free_slots_list(uid, day, weekly=False):
     result = await run_in_threadpool(slots, day=day.isoformat())
     available = result.get('slots') or []
     if not available:
         SESSIONS.pop(str(uid), None)
-        await send(uid, f'Horários livres em {day:%d/%m/%Y}: nenhum disponível.', MENU)
+        await send(uid, f'Horários livres em {day:%d/%m/%Y}: nenhum disponível.', {'inline_keyboard': [[{'text': 'Voltar à semana', 'callback_data': 'weekmenu:' + day.isoformat()}]]} if weekly else MENU)
         return
     nonce = secrets.token_hex(12)
     SESSIONS[str(uid)] = {'mode': 'slot_choice', 'slots': available, 'nonce': nonce,
@@ -294,6 +314,8 @@ async def free_slots_list(uid, day):
     buttons = [{'text': item['label'], 'callback_data': f'slot:{nonce}:{index}'}
                for index, item in enumerate(available)]
     rows = [buttons[index:index + 4] for index in range(0, len(buttons), 4)]
+    if weekly:
+        rows.append([{'text': 'Voltar à semana', 'callback_data': 'weekmenu:' + day.isoformat()}])
     await send(uid, f'Horários livres em {day:%d/%m/%Y}\nToque no horário desejado. A duração e a disponibilidade completa serão conferidas antes de salvar.',
                {'inline_keyboard': rows})
 
@@ -358,6 +380,16 @@ async def handle(update):
         SESSIONS.pop(key, None)
         state = None
     if callback:
+        if callback.get('data', '').startswith(('weekmenu:', 'weekday:', 'weekslots:')):
+            action, value = callback['data'].split(':', 1)
+            day = datetime.strptime(value, '%Y-%m-%d').date()
+            if action == 'weekmenu':
+                await week_menu(uid, day)
+            elif action == 'weekday':
+                await status_list(uid, day, agenda=True, weekly=True)
+            else:
+                await free_slots_list(uid, day, weekly=True)
+            return
         if callback.get('data', '').startswith('slot:'):
             await free_slot_callback(uid, callback['data'], state)
             return
@@ -395,6 +427,10 @@ async def handle(update):
         text, value = 'Agenda de hoje', 'agenda de hoje'
     elif value in ('quero agendar', 'quero marcar', 'agendar consulta', 'marcar consulta'):
         text, value = 'Novo agendamento', 'novo agendamento'
+    if value in ('📅 agenda da semana', 'agenda da semana', 'agenda semanal', '/semana'):
+        ai_forget(uid)
+        await week_menu(uid)
+        return
     if value in ('/start', '/menu', 'menu', '/cancelar', 'cancelar', 'cancelar operacao'):
         SESSIONS.pop(key, None)
         ai_forget(uid)
@@ -570,4 +606,5 @@ async def configure_webhook():
         logging.getLogger(__name__).info('Telegram interaction webhook configured')
     except HTTPException:
         logging.getLogger(__name__).warning('Telegram webhook configuration failed')
+
 
