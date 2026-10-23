@@ -130,3 +130,16 @@ app.include_router(telegram_router)
 @app.on_event("startup")
 async def start_telegram_interaction():
     await configure_webhook()
+
+
+# Private clinical drafts and consented public conversation; neither route can write records.
+from clinical_service import ClinicalRequest, draft_clinical
+from conversation_service import ConversationRequest, converse
+
+@app.post('/api/myla/clinical/draft', dependencies=[Depends(verify_token)])
+async def post_clinical_draft(body: ClinicalRequest):
+    return await draft_clinical(body)
+
+@app.post('/api/myla/conversation', dependencies=[Depends(verify_token)])
+async def post_myla_conversation(body: ConversationRequest):
+    return await converse(body)
