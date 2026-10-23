@@ -14,9 +14,14 @@ provider.TOPICS = {'endereco': 'Endereço aprovado'}
 def provider_error(code):
     raise HTTPException(502, 'Provider unavailable')
 provider.gemini_error = provider_error
+original_provider = sys.modules.get('myla_service')
 sys.modules['myla_service'] = provider
 from clinical_service import ClinicalRequest, ClinicalDraft, draft_clinical
 from conversation_service import ConversationRequest, converse
+if original_provider is None:
+    sys.modules.pop('myla_service', None)
+else:
+    sys.modules['myla_service'] = original_provider
 
 class Reply:
     status_code = 200
