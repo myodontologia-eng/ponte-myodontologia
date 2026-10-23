@@ -87,8 +87,10 @@ def status_description(description, status):
 def notify_calendar_change(action, event, previous=None, user=None):
     """Send only operational metadata; never patient names or clinical details."""
     token = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
-    chat_id = os.getenv('DR_MARCIO_CHAT_ID', '').strip()
-    if not token or not chat_id:
+    owner_id = os.getenv('DR_MARCIO_CHAT_ID', '').strip()
+    recipients = list(dict.fromkeys([value.strip() for value in
+        [owner_id, *os.getenv('TELEGRAM_SECRETARIA_IDS', '').split(',')] if value.strip()]))
+    if not token or not recipients:
         return {'sent': False, 'reason': 'not_configured'}
     def display_time(item):
         value = (item or {}).get('dateTime')
@@ -104,14 +106,27 @@ def notify_calendar_change(action, event, previous=None, user=None):
                 lines.append('Status anterior: ' + old_status)
             if previous.get('start') != event.get('start'):
                 lines.append('Horário anterior: ' + display_time(previous.get('start')))
-        lines.append('Confira os detalhes na agenda: https://sistema.myodontologia.com/')
+        lines.append('Confira os detalhes no módulo Secretaria: https://sistema.myodontologia.com/?myod_panel=secretaria')
+        delivered = []
         with httpx.Client(timeout=httpx.Timeout(8, connect=3)) as client:
-            response = client.post('https://api.telegram.org/bot' + token + '/sendMessage', json={
-                'chat_id': chat_id, 'text': '\n'.join(lines), 'link_preview_options': {'is_disabled': True}})
-            if response.status_code != 200 or response.json().get('ok') is not True:
-                logging.getLogger(__name__).warning('Calendar Telegram notification rejected (HTTP %s)', response.status_code)
-                return {'sent': False, 'reason': 'telegram_rejected'}
-        return {'sent': True}
+            for recipient in recipients:
+                try:
+                    response = client.post('https://api.telegram.org/bot' + token + '/sendMessage', json={
+                        'chat_id': recipient, 'text': '\n'.join(lines), 'protect_content': True,
+                        'link_preview_options': {'is_disabled': True},
+                        'reply_markup': {'inline_keyboard': [[{
+                            'text': 'Abrir módulo Secretaria',
+                            'url': 'https://sistema.myodontologia.com/?myod_panel=secretaria'}]]}})
+                    if response.status_code == 200 and response.json().get('ok') is True:
+                        delivered.append(recipient)
+                    else:
+                        logging.getLogger(__name__).warning('Calendar Telegram notification rejected (HTTP %s)', response.status_code)
+                except Exception:
+                    logging.getLogger(__name__).warning('Calendar Telegram recipient unavailable')
+        return {'sent': owner_id in delivered if owner_id else bool(delivered),
+                'all_sent': len(delivered) == len(recipients),
+                'delivered_count': len(delivered), 'recipient_count': len(recipients)}
+
     except Exception:
         # Do not log exception text: HTTP exceptions may contain the bot token.
         logging.getLogger(__name__).warning('Calendar Telegram notification unavailable')
