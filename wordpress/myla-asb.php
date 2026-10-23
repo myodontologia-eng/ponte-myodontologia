@@ -10,7 +10,7 @@ add_filter('acf/load_fields', function($fields) {
             $subs=[];
             foreach(['descricao'=>'Tarefa / retorno','prazo'=>'Prazo informado','situacao'=>'Situação'] as $name=>$label)
                 $subs[]=['key'=>'field_myfc_asb_tarefas_'.$name,'name'=>'asb_tarefas_'.$name,'label'=>$label,'type'=>$name==='descricao'?'textarea':'text','rows'=>3];
-            $out[]=['key'=>'field_myfc_asb_tarefas','name'=>'asb_tarefas','label'=>'Tarefas e retornos pendentes','type'=>'repeatix_repeater','layout'=>'block','button_label'=>'Adicionar tarefa','sub_fields'=>$subs,'instructions'=>'Registro de pendências. Uma tarefa não reserva horário nem envia notificações. Agende pela agenda integrada após conferir a disponibilidade.'];
+            $out[]=['key'=>'field_myfc_asb_tarefas','name'=>'asb_tarefas','prefix'=>'acf','label'=>'Tarefas e retornos pendentes','type'=>'repeatix_repeater','layout'=>'block','button_label'=>'Adicionar tarefa','sub_fields'=>$subs,'instructions'=>'Registro de pendências. Uma tarefa não reserva horário nem envia notificações. Agende pela agenda integrada após conferir a disponibilidade.'];
         }
     }
     return $out;
