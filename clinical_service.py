@@ -88,7 +88,7 @@ async def draft_clinical(body: ClinicalRequest):
                 json={"systemInstruction": {"parts": [{"text": SYSTEM}]},
                       "contents": [{"role": "user", "parts": [{"text": json.dumps(
                           {"data_referencia": body.reference_date.isoformat(), "anotacao": body.note}, ensure_ascii=False)}]}],
-                      "generationConfig": {"responseMimeType": "application/json", "temperature": 0,
+                      "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": ClinicalDraft.model_json_schema(), "temperature": 0,
                                            "maxOutputTokens": 8192}})
         if response.status_code != 200:
             gemini_error(response.status_code)
