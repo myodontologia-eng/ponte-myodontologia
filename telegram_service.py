@@ -166,7 +166,7 @@ async def arrival_list(uid):
     eligible = []
     for event in events:
         status = ((event.get('extendedProperties') or {}).get('private') or {}).get('status') or 'Agendado'
-        if event.get('status') == 'cancelled' or status not in ('Agendado', 'Remarcado', 'Atendimento atrasado'):
+        if event.get('status') == 'cancelled' or status not in ('Agendado', 'Confirmado', 'Remarcado', 'Atendimento atrasado'):
             continue
         value = event.get('start', {}).get('dateTime')
         if not value or not event.get('id') or not event.get('etag'):
@@ -272,7 +272,7 @@ async def status_callback(uid, data, state):
             await send(uid, 'Agendamento inválido. Atualize a lista.', MENU)
             return
         state['nonce'] = secrets.token_hex(12)
-        statuses = ['Agendado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']
+        statuses = ['Agendado', 'Confirmado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']
         rows = [[{'text': label, 'callback_data': f"status:{state['nonce']}:{label}"}] for label in statuses]
         await send(uid, 'Agendamento: ' + appointment_label(state['selected'])[:250] + '\nQual é a nova situação?', {'inline_keyboard': rows})
         return
@@ -280,7 +280,7 @@ async def status_callback(uid, data, state):
         return
     if action == 'status' and len(parts) == 3:
         status = parts[2]
-        if status not in ['Agendado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']:
+        if status not in ['Agendado', 'Confirmado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']:
             return
         event = state['selected']
         if status == 'Remarcado':
