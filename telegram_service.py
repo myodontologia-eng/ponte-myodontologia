@@ -16,7 +16,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from appointment_identity import appointment_identity, appointment_label
-from calendar_service import CalendarError, list_events, update_event_status
+from calendar_service import CalendarError, list_events, update_event_status, calendar_id
 from myla_service import create_checked, slots, reschedule_checked
 from telegram_ai import plan as ai_plan, forget as ai_forget
 
@@ -256,6 +256,32 @@ async def status_list(uid, day, agenda=False, weekly=False):
         await send(uid, 'Exibindo os primeiros 60 agendamentos. Consulte a agenda no sistema para ver os demais.', MENU)
 
 
+def appointment_phone(event):
+    match = re.search(r'^\s*Telefone:[ \t]*([^\r\n]*)', event.get('description') or '', re.I | re.M)
+    phone = match.group(1).strip() if match else ''
+    return phone if 10 <= len(re.sub(r'\D', '', phone)) <= 13 else ''
+
+
+async def contact_phone(event):
+    """Read only the phone for the exact calendar/event link, never match names."""
+    fallback = appointment_phone(event)
+    token = os.getenv('INTERNAL_API_TOKEN', '')
+    if not token:
+        return fallback
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.post('https://sistema.myodontologia.com/wp-json/myod/v1/telegram/appointment-contact',
+                headers={'Authorization': 'Bearer ' + token},
+                json={'event_id': event['id'], 'calendar_id': calendar_id()})
+        response.raise_for_status()
+        data = response.json()
+        if data.get('linked') is True:
+            return appointment_phone({'description': 'Telefone: ' + str(data.get('phone') or '')})
+    except Exception:
+        logging.getLogger(__name__).warning('Appointment contact lookup unavailable')
+    return fallback
+
+
 async def status_callback(uid, data, state):
     parts = data.split(':')
     if not state or state.get('mode') != 'status' or len(parts) < 2 or parts[1] != state.get('nonce'):
@@ -274,7 +300,8 @@ async def status_callback(uid, data, state):
         state['nonce'] = secrets.token_hex(12)
         statuses = ['Agendado', 'Confirmado', 'Aguardando', 'Atendido', 'Faltou', 'Desmarcou', 'Atendimento atrasado', 'Remarcado']
         rows = [[{'text': label, 'callback_data': f"status:{state['nonce']}:{label}"}] for label in statuses]
-        await send(uid, 'Agendamento: ' + appointment_label(state['selected'])[:250] + '\nQual é a nova situação?', {'inline_keyboard': rows})
+        phone = await contact_phone(state['selected'])
+        await send(uid, 'Agendamento: ' + appointment_label(state['selected'])[:250] + '\nTelefone: ' + (phone or 'ainda não informado') + '\nQual é a nova situação?', {'inline_keyboard': rows})
         return
     if not state.get('selected'):
         return
