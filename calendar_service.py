@@ -11,7 +11,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
-ALLOWED_STATUSES = ['Agendado', 'Aguardando', 'Atendido', 'Faltou', 'Remarcado', 'Atendimento atrasado', 'Desmarcou']
+ALLOWED_STATUSES = ['Agendado', 'Confirmado', 'Aguardando', 'Atendido', 'Faltou', 'Remarcado', 'Atendimento atrasado', 'Desmarcou']
 
 class CalendarError(Exception):
     def __init__(self, code, message):
@@ -158,7 +158,7 @@ def create_event(summary, description, start, end, idempotency_key, user=None):
     except HttpError as error:
         translate_error(error)
 
-def update_event_status(event_id, status, start=None, end=None, user=None, etag=None):
+def update_event_status(event_id, status, start=None, end=None, user=None, etag=None, phone=None):
     if status not in ALLOWED_STATUSES:
         raise CalendarError(422, 'Status inválido')
     if bool(start) != bool(end):
@@ -178,6 +178,13 @@ def update_event_status(event_id, status, start=None, end=None, user=None, etag=
         if user:
             props['updated_by'] = user[:200]
         body = {'status': 'cancelled' if status == 'Desmarcou' else 'confirmed', 'extendedProperties': {'private': props}, 'description': status_description(event.get('description', ''), status)}
+        if phone is not None:
+            phone = re.sub(r'\s+', ' ', phone).strip()
+            if not 10 <= len(re.sub(r'\D', '', phone)) <= 13:
+                raise CalendarError(422, 'Confira o telefone com DDD')
+            description = body['description']
+            line = 'Telefone: ' + phone
+            body['description'] = re.sub(r'(?im)^Telefone:[^\r\n]*', lambda _: line, description) if re.search(r'(?im)^Telefone:', description) else description.rstrip() + '\n' + line
         if start:
             body.update(start={'dateTime': start}, end={'dateTime': end})
         request = service.events().patch(calendarId=cid, eventId=event_id, body=body, sendUpdates='none')
