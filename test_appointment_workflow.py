@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 os.environ.setdefault('GOOGLE_CALENDAR_ID', 'test-calendar')
 from appointment_identity import appointment_identity, appointment_label
 import telegram_service as telegram
-from calendar_service import safe_event, CalendarError, list_events
+from calendar_service import safe_event, CalendarError, list_events, update_event_status
 
 
 class IdentityTest(unittest.TestCase):
@@ -19,6 +19,24 @@ class IdentityTest(unittest.TestCase):
     def test_explicit_name_wins_and_hyphenated_names_are_preserved(self):
         event = {'summary': 'Título antigo', 'description': 'Nome: Ana-Maria Exemplo\nMotivo: Avaliação\nStatus: Agendado'}
         self.assertEqual(appointment_identity(event), {'name': 'Ana-Maria Exemplo', 'reason': 'Avaliação'})
+
+    def test_reason_only_can_clear_legacy_reason_without_changing_status(self):
+        service = MagicMock()
+        events = service.events.return_value
+        events.get.return_value.execute.return_value = {
+            'id': 'legacy', 'etag': 'v1', 'summary': 'Retorno - Paciente Exemplo',
+            'description': 'Telefone: 44999999999',
+            'extendedProperties': {'private': {'status': 'Confirmado'}},
+        }
+        events.patch.return_value.execute.return_value = {'etag': 'v2'}
+        with patch('calendar_service.get_calendar_service', return_value=service), patch('calendar_service.notify_calendar_change'):
+            result = update_event_status('legacy', reason='', etag='v1')
+        body = events.patch.call_args.kwargs['body']
+        self.assertNotIn('status', body)
+        self.assertEqual(body['extendedProperties']['private']['status'], 'Confirmado')
+        self.assertIn('Telefone: 44999999999', body['description'])
+        self.assertEqual(result['patient_name'], 'Paciente Exemplo')
+        self.assertEqual(result['patient_reason'], '')
 
     def test_missing_optional_properties(self):
         self.assertEqual(appointment_identity({'summary': 'Paciente', 'extendedProperties': None})['name'], 'Paciente')
