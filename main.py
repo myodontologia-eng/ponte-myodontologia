@@ -20,7 +20,8 @@ class PromptRequest(BaseModel):
 
 class UpdateStatusRequest(BaseModel):
     phone: Optional[str] = Field(default=None, max_length=40)
-    status: str = Field(max_length=40)
+    reason: Optional[str] = Field(default=None, max_length=200)
+    status: Optional[str] = Field(default=None, max_length=40)
     start: Optional[str] = None
     end: Optional[str] = None
     user: Optional[str] = Field(default=None, max_length=200)
