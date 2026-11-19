@@ -132,6 +132,13 @@ def extract(text, draft):
 
 async def prompt(chat, state):
     d = state['draft']
+    if state.get('mode') == 'book' and d.get('name'):
+        for key, question in [('phone', 'Qual é o telefone com DDD? Envie /pular para deixar em branco.'),
+                              ('reason', 'Qual é o motivo da consulta? Envie /pular para deixar em branco.')]:
+            if key not in d:
+                state['waiting'] = key
+                await send(chat, question)
+                return
     for key, question in [('name', 'Qual é o nome do paciente?'),
                           ('day', 'Para qual dia? Pode escrever amanhã ou 23/10/2026.'),
                           ('clock', 'Qual horário? Exemplo: 17h ou 17:30.'),
@@ -153,7 +160,8 @@ async def prompt(chat, state):
     state['nonce'] = secrets.token_hex(16)
     d['start'], d['end'] = start.isoformat(), end.isoformat()
     question = 'Confirma a remarcação?' if state.get('mode') == 'reschedule' else 'Confirma o agendamento?'
-    await send(chat, f"{question}\nPaciente: {d['name']}\nMotivo: {d.get('reason') or 'Não informado'}\nDia: {start:%d/%m/%Y}\nHorário: {start:%H:%M}–{end:%H:%M}\nDuração: {d['duration']} minutos",
+    phone_line = f"\nTelefone: {d.get('phone') or 'Não informado'}" if state.get('mode') == 'book' else ''
+    await send(chat, f"{question}\nPaciente: {d['name']}{phone_line}\nMotivo: {d.get('reason') or 'Não informado'}\nDia: {start:%d/%m/%Y}\nHorário: {start:%H:%M}–{end:%H:%M}\nDuração: {d['duration']} minutos",
                {'inline_keyboard': [[{'text': 'Confirmar agendamento', 'callback_data': 'confirm:' + state['nonce']},
                                      {'text': 'Cancelar', 'callback_data': 'cancel:' + state['nonce']}]]})
 
@@ -439,7 +447,7 @@ async def handle(update):
                 event = state['selected']
                 await run_in_threadpool(reschedule_checked, event_id=event['id'], start=d['start'], end=d['end'], etag=event['etag'], user='telegram:' + key)
             else:
-                await run_in_threadpool(create_checked, summary=d['name'], description='Nome: ' + d['name'] + '\nMotivo: ' + (d.get('reason') or 'Não informado') + '\nAgendado pela equipe via Telegram.',
+                await run_in_threadpool(create_checked, summary=d['name'], description='Nome: ' + d['name'] + '\nTelefone: ' + (d.get('phone') or 'Não informado') + '\nMotivo: ' + (d.get('reason') or 'Não informado') + '\nAgendado pela equipe via Telegram.',
                                             start=d['start'], end=d['end'], idempotency_key='telegram-' + nonce, user='telegram:' + key)
             state['waiting'] = 'done'
             await send(uid, 'Remarcação salva na agenda central.' if state.get('mode') == 'reschedule' else 'Agendamento salvo na agenda central.', MENU)
@@ -492,6 +500,19 @@ async def handle(update):
     slots_day = state and state.get('mode') == 'slots' and get_day(text)
     direct = (value in ('agenda de hoje', '/agenda', 'horarios livres', 'novo agendamento')
               or value.startswith('/horarios') or bool(agenda_day) or bool(slots_day))
+    if text and not direct and state and state.get('mode') == 'book' and state.get('waiting') in ('phone', 'reason'):
+        field = state['waiting']
+        entry = '' if value in ('pular', '/pular') else ' '.join(text.split())
+        if field == 'phone' and entry and (not re.fullmatch(r'[+0-9() .-]+', entry) or not 10 <= len(re.sub(r'\D', '', entry)) <= 13 or len(entry) > 40):
+            await send(uid, 'Confira o telefone com DDD ou envie /pular.')
+            return
+        if field == 'reason' and len(entry) > 200:
+            await send(uid, 'Informe o motivo em até 200 caracteres ou envie /pular.')
+            return
+        state['draft'][field] = entry
+        state['expires'] = time.monotonic() + 1200
+        await prompt(uid, state)
+        return
     if text and not update.get('_ai_resolved') and not direct:
         active = state if state and state.get('waiting') != 'done' else None
         result = await ai_plan(uid, text, active)

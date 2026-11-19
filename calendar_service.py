@@ -158,8 +158,8 @@ def create_event(summary, description, start, end, idempotency_key, user=None):
     except HttpError as error:
         translate_error(error)
 
-def update_event_status(event_id, status, start=None, end=None, user=None, etag=None, phone=None):
-    if status not in ALLOWED_STATUSES:
+def update_event_status(event_id, status=None, start=None, end=None, user=None, etag=None, phone=None, reason=None):
+    if status not in ALLOWED_STATUSES and (status is not None or reason is None or phone is not None or start or end):
         raise CalendarError(422, 'Status inválido')
     if bool(start) != bool(end):
         raise CalendarError(422, 'Informe início e término juntos')
@@ -173,11 +173,15 @@ def update_event_status(event_id, status, start=None, end=None, user=None, etag=
             raise CalendarError(412, 'O evento mudou. Atualize a agenda antes de salvar')
         props = dict(event.get('extendedProperties', {}).get('private', {}))
         previous = props.get('status')
-        props['status'] = status
+        if status is not None:
+            props['status'] = status
         props['updated_at'] = datetime.now(timezone.utc).isoformat()
         if user:
             props['updated_by'] = user[:200]
-        body = {'status': 'cancelled' if status == 'Desmarcou' else 'confirmed', 'extendedProperties': {'private': props}, 'description': status_description(event.get('description', ''), status)}
+        body = {'extendedProperties': {'private': props}, 'description': event.get('description') or ''}
+        if status is not None:
+            body['status'] = 'cancelled' if status == 'Desmarcou' else 'confirmed'
+            body['description'] = status_description(body['description'], status)
         if phone is not None:
             phone = re.sub(r'\s+', ' ', phone).strip()
             if not 10 <= len(re.sub(r'\D', '', phone)) <= 13:
@@ -185,15 +189,28 @@ def update_event_status(event_id, status, start=None, end=None, user=None, etag=
             description = body['description']
             line = 'Telefone: ' + phone
             body['description'] = re.sub(r'(?im)^Telefone:[^\r\n]*', lambda _: line, description) if re.search(r'(?im)^Telefone:', description) else description.rstrip() + '\n' + line
+        if reason is not None:
+            reason = ' '.join(reason.split())
+            props['patient_reason'] = reason
+            props['patient_name'] = appointment_identity(event)['name']
+            description = body['description']
+            line = 'Motivo: ' + (reason or 'Não informado')
+            if re.search(r'(?im)^[ \t]*Motivo:', description):
+                body['description'] = re.sub(r'(?im)^[ \t]*Motivo:[^\r\n]*', lambda _: line, description)
+            else:
+                body['description'] = description.rstrip() + '\n' + line
         if start:
             body.update(start={'dateTime': start}, end={'dateTime': end})
         request = service.events().patch(calendarId=cid, eventId=event_id, body=body, sendUpdates='none')
         request.headers['If-Match'] = event['etag']
         updated = request.execute()
         final_event = event | body | updated
-        changed = any(event.get(key) != final_event.get(key) for key in ('start', 'end', 'description', 'status')) or previous != status
+        changed = any(event.get(key) != final_event.get(key) for key in ('start', 'end', 'description', 'status')) or (status is not None and previous != status)
         notification = notify_calendar_change('Paciente chegou — aguardando atendimento' if status == 'Aguardando' and previous != status else 'Agenda alterada', final_event, previous=event, user=user) if changed else {'sent': False, 'reason': 'unchanged'}
-        return safe_event(final_event) | {'telegram_notification': notification} | {'previous_status': previous, 'new_status': status, 'updated_at': props['updated_at'], 'updated_by': user}
+        result = safe_event(final_event)
+        if reason is not None:
+            result['patient_reason'] = reason
+        return result | {'telegram_notification': notification} | {'previous_status': previous, 'new_status': props.get('status'), 'updated_at': props['updated_at'], 'updated_by': user}
     except HttpError as error:
         translate_error(error)
 
